@@ -517,7 +517,11 @@ export default function Screen() {
                         {isIncomplete ? (
                           <div>
                             <p className="flex items-start gap-2 italic text-slate-600">
-                              <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+                              <AlertCircle
+                                size={16}
+                                className="mt-0.5 shrink-0"
+                                aria-hidden="true"
+                              />
                               This answer did not finish.
                             </p>
                             <button

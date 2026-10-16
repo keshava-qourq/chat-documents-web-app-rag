@@ -290,12 +290,20 @@ describe("Chat screen — live threads API", () => {
           status: "incomplete",
           citations: [],
         },
-        { id: "m-3", role: "assistant", content: "Now it finished.", status: "complete", citations: [] },
+        {
+          id: "m-3",
+          role: "assistant",
+          content: "Now it finished.",
+          status: "complete",
+          citations: [],
+        },
       ],
     });
 
     await user.click(screen.getByRole("button", { name: /ask again/i }));
-    await waitFor(() => expect(mockedPostMessage).toHaveBeenCalledWith("t-1", "What happened?", expect.any(Function)));
+    await waitFor(() =>
+      expect(mockedPostMessage).toHaveBeenCalledWith("t-1", "What happened?", expect.any(Function)),
+    );
     expect(await screen.findByText("Now it finished.")).toBeInTheDocument();
   });
 
@@ -378,7 +386,9 @@ describe("Chat screen — live threads API", () => {
     await user.click(screen.getByRole("button", { name: /^send/i }));
 
     await waitFor(() => expect(mockedCreateThread).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(mockedPostMessage).toHaveBeenCalledWith("t-new", "Hello?", expect.any(Function)));
+    await waitFor(() =>
+      expect(mockedPostMessage).toHaveBeenCalledWith("t-new", "Hello?", expect.any(Function)),
+    );
     expect(await screen.findByText("Hi there.")).toBeInTheDocument();
   });
 
