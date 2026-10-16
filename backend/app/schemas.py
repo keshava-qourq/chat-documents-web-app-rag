@@ -29,9 +29,14 @@ class StubResponse(BaseModel):
 
 
 class DocumentAccepted(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: uuid.UUID
     file_name: str
+    size_bytes: int
+    mime_type: str
     status: str
+    uploaded_at: datetime
 
 
 class DocumentRejected(BaseModel):
