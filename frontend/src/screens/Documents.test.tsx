@@ -195,6 +195,52 @@ describe("Documents screen — indexing progress and failures", () => {
     ).toBeInTheDocument();
   });
 
+  it("handles a mixed batch response: the accepted file joins the board while the cap-rejected file only shows a notice", async () => {
+    // A batch can straddle the cap: earlier files in the same upload call
+    // land inside the limit and get accepted, a later one pushes the
+    // library over it and comes back rejected in the very same response.
+    // Both outcomes have to be reflected at once, not one clobbering the
+    // other.
+    mockedList.mockResolvedValue([]);
+    mockedUpload.mockResolvedValue({
+      accepted: [
+        {
+          id: "doc-9",
+          file_name: "first.pdf",
+          size_bytes: 1000,
+          mime_type: "application/pdf",
+          status: "processing",
+          uploaded_at: new Date().toISOString(),
+        },
+      ],
+      rejected: [
+        {
+          file_name: "second.pdf",
+          reason: "The library is full (2 document limit). Delete an existing document first.",
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await waitFor(() => expect(mockedList).toHaveBeenCalled());
+
+    const input = document.getElementById("document-files") as HTMLInputElement;
+    const files = [
+      new File(["a"], "first.pdf", { type: "application/pdf" }),
+      new File(["b"], "second.pdf", { type: "application/pdf" }),
+    ];
+    await user.upload(input, files);
+
+    expect(await screen.findByText("first.pdf")).toBeInTheDocument();
+    expect(await screen.findByText(/second\.pdf wasn't uploaded/i)).toBeInTheDocument();
+    expect(
+      screen.getByText("The library is full (2 document limit). Delete an existing document first."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("second.pdf")).not.toBeInTheDocument();
+  });
+
   it("deletes a document via the real API and removes it from the board", async () => {
     mockedList.mockResolvedValue([
       {

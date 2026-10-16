@@ -6,6 +6,14 @@ Uses the shared `client`, `db_session` and `db_sessionmaker` fixtures from
 MinIO call anywhere in this module, and no wall-clock sleeps: ordering is
 proven by writing distinct `last_active_at` values directly, not by waiting
 for time to pass.
+
+This file also absorbs the gaps left by `backend/app/tests/test_threads.py`
+(the duplicate unit-test pass an earlier, `backend/app/`-scoped ticket wrote
+for this same surface, since that agent had no write access to this
+directory): the 404 and validation paths on `POST /threads/{id}/messages`
+specifically, exercised at the HTTP layer rather than only against the
+Pydantic model in `test_schemas.py` or against `derive_title`/`request_answer`
+directly in `test_services.py`.
 """
 
 import uuid
@@ -91,6 +99,25 @@ def test_get_unknown_thread_id_returns_404(client) -> None:
     assert response.status_code == 404
 
 
+# --- a posted question shows up in the thread's own history --------------
+
+
+def test_the_users_own_turn_appears_in_thread_detail_with_no_citations(client) -> None:
+    thread_id = client.post("/threads").json()["id"]
+
+    client.post(
+        f"/threads/{thread_id}/messages",
+        json={"question": "Where is the expenses policy documented?"},
+    )
+
+    detail = client.get(f"/threads/{thread_id}").json()
+    assert len(detail["messages"]) >= 1
+    user_message = detail["messages"][0]
+    assert user_message["role"] == "user"
+    assert user_message["content"] == "Where is the expenses policy documented?"
+    assert user_message["citations"] == []
+
+
 # --- AC-048 / AC-049 / AC-050: auto-titling ------------------------------
 
 
@@ -132,6 +159,42 @@ def test_a_second_question_leaves_the_title_unchanged(client) -> None:
     assert title_after_second == title_after_first
 
 
+# --- posting a question: 404 and validation at the HTTP layer ------------
+
+
+def test_post_message_to_an_unknown_thread_id_returns_404_and_persists_nothing(
+    client, db_session
+) -> None:
+    response = client.post(
+        f"/threads/{uuid.uuid4()}/messages", json={"question": "Anybody there?"}
+    )
+
+    assert response.status_code == 404
+    assert db_session.query(Message).count() == 0
+
+
+def test_post_message_with_an_empty_question_returns_422_and_persists_nothing(
+    client, db_session
+) -> None:
+    thread_id = client.post("/threads").json()["id"]
+
+    response = client.post(f"/threads/{thread_id}/messages", json={"question": ""})
+
+    assert response.status_code == 422
+    assert db_session.query(Message).filter(Message.thread_id == uuid.UUID(thread_id)).count() == 0
+    # The thread itself is untouched -- still its default title.
+    thread = client.get(f"/threads/{thread_id}").json()
+    assert thread["title"] == "New conversation"
+
+
+def test_post_message_with_a_missing_question_field_returns_422(client) -> None:
+    thread_id = client.post("/threads").json()["id"]
+
+    response = client.post(f"/threads/{thread_id}/messages", json={})
+
+    assert response.status_code == 422
+
+
 # --- AC-051 / AC-052: rename ---------------------------------------------
 
 
@@ -160,6 +223,23 @@ def test_rename_with_empty_title_returns_422_and_leaves_previous_title_intact(cl
 
     assert response.status_code == 422
 
+    thread = client.get(f"/threads/{thread_id}").json()
+    assert thread["title"] == "New conversation"
+
+
+def test_rename_with_a_literal_empty_string_title_returns_422_via_request_validation(
+    client,
+) -> None:
+    """Distinct code path from the whitespace-only case above: `""` is
+    rejected by `ThreadRenameRequest`'s own `min_length=1` before the
+    handler's manual `.strip()` check ever runs, so this proves the schema
+    is actually wired into the route rather than only tested in isolation
+    (as `test_schemas.py` already does for the bare model)."""
+    thread_id = client.post("/threads").json()["id"]
+
+    response = client.patch(f"/threads/{thread_id}", json={"title": ""})
+
+    assert response.status_code == 422
     thread = client.get(f"/threads/{thread_id}").json()
     assert thread["title"] == "New conversation"
 

@@ -138,6 +138,36 @@ describe("postMessage — SSE stream parsing against the real backend contract",
       detail: "Too many requests, try again shortly.",
     });
   });
+
+  // AC-067/AC-068 integration: `routers.threads.post_message`'s pre-flight
+  // check raises `HTTPException(503, detail={"code": "gemini_not_configured",
+  // "message": "..."})` -- an *object*-shaped `detail`, unlike every other
+  // endpoint's plain string `detail`. `postMessage`'s error branch only ever
+  // reads a string out of `body.detail`, so this must not throw while
+  // parsing the body (e.g. on `JSON.stringify` of something unexpected) and
+  // must not leak the raw object through `.detail` -- it falls back to the
+  // same empty string any other unrecognised body shape gets, which is what
+  // every caller already knows how to treat as a generic, retryable failure.
+  it("does not crash and falls back to an empty detail when a 503 response's detail is the gemini-not-configured object shape", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 503,
+        json: async () => ({
+          detail: {
+            code: "gemini_not_configured",
+            message: "GEMINI_API_KEY is not set. Set it in the server's environment.",
+          },
+        }),
+      })),
+    );
+
+    await expect(postMessage("t-1", "question")).rejects.toMatchObject({
+      status: 503,
+      detail: "",
+    });
+  });
 });
 
 describe("apiFetch — the JSON request helper every other endpoint function is built on", () => {
@@ -197,6 +227,22 @@ describe("apiFetch — the JSON request helper every other endpoint function is 
 
     await expect(apiFetch("/threads/unknown")).rejects.toMatchObject({
       status: 500,
+      detail: "",
+    });
+  });
+
+  it("falls back to an empty detail (not the raw object) when a response's detail is object-shaped", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 503,
+        json: async () => ({ detail: { code: "gemini_not_configured", message: "unset" } }),
+      })),
+    );
+
+    await expect(apiFetch("/threads/unknown")).rejects.toMatchObject({
+      status: 503,
       detail: "",
     });
   });

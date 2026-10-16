@@ -54,6 +54,23 @@ def test_upload_rejected_with_library_full_reason_once_cap_reached(
     assert "delete" in reason
 
 
+def test_cap_full_reason_names_the_configured_limit_value(
+    client, db_session, monkeypatch
+) -> None:
+    """The reason text is supposed to tell the caller *what* the cap is, not
+    just that one exists -- a hard-coded message that always says the same
+    number regardless of `DOCUMENT_CAP` would still satisfy the "full" /
+    "delete" substring checks above, so the actual configured value has to be
+    asserted separately."""
+    monkeypatch.setenv("DOCUMENT_CAP", "4")
+    _seed_documents(db_session, 4)
+
+    response = client.post("/documents", files=[_file("new.txt")])
+
+    reason = response.json()["rejected"][0]["reason"]
+    assert "4" in reason
+
+
 def test_cap_applies_within_the_same_batch_once_reached(client, db_session, monkeypatch) -> None:
     monkeypatch.setenv("DOCUMENT_CAP", "2")
     _seed_documents(db_session, 1)
@@ -68,6 +85,61 @@ def test_cap_applies_within_the_same_batch_once_reached(client, db_session, monk
     assert body["accepted"][0]["file_name"] == "first.txt"
     assert len(body["rejected"]) == 1
     assert body["rejected"][0]["file_name"] == "second.txt"
+    assert "full" in body["rejected"][0]["reason"].lower()
+
+
+# --- the cap counts the whole library, not just ready documents -------------
+
+
+def test_cap_counts_failed_and_processing_documents_toward_the_limit(
+    client, db_session, monkeypatch
+) -> None:
+    """A library at its cap because of documents that failed indexing, or
+    are still processing, must refuse new uploads exactly as one at capacity
+    on `ready` documents would -- the cap is on how many rows the library
+    holds, not on how many of them are usable yet."""
+    monkeypatch.setenv("DOCUMENT_CAP", "2")
+    db_session.add(
+        Document(
+            id=uuid.uuid4(),
+            file_name="failed-doc.txt",
+            mime_type="text/plain",
+            size_bytes=10,
+            storage_key="failed-doc.txt",
+            status="failed",
+            failure_reason="boom",
+        )
+    )
+    db_session.add(
+        Document(
+            id=uuid.uuid4(),
+            file_name="processing-doc.txt",
+            mime_type="text/plain",
+            size_bytes=10,
+            storage_key="processing-doc.txt",
+            status="processing",
+        )
+    )
+    db_session.commit()
+
+    response = client.post("/documents", files=[_file("over-cap.txt")])
+
+    body = response.json()
+    assert body["accepted"] == []
+    assert len(body["rejected"]) == 1
+    assert "full" in body["rejected"][0]["reason"].lower()
+
+
+def test_cap_set_to_zero_rejects_every_upload_even_on_an_empty_library(
+    client, db_session, monkeypatch
+) -> None:
+    monkeypatch.setenv("DOCUMENT_CAP", "0")
+
+    response = client.post("/documents", files=[_file("anything.txt")])
+
+    body = response.json()
+    assert body["accepted"] == []
+    assert len(body["rejected"]) == 1
     assert "full" in body["rejected"][0]["reason"].lower()
 
 

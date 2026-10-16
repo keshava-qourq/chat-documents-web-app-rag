@@ -672,6 +672,41 @@ describe("Chat screen — live threads API", () => {
     expect(screen.getByText("Anything in the library?")).toBeInTheDocument();
   });
 
+  // AC-067/AC-068 integration: `routers.threads.post_message`'s pre-flight
+  // check rejects with a 503 whose `detail` is an object
+  // (`{code: "gemini_not_configured", message: "..."}`), not the plain
+  // string every other failure sends. `api.ts`'s real `postMessage` (see
+  // `lib/api.test.ts`) turns that into an `ApiError(503, "", ...)` -- status
+  // 503, empty `detail` -- rather than throwing while parsing it or leaking
+  // the raw object. This proves the screen half of that same contract: a
+  // rejection shaped exactly like that one is treated as a plain send
+  // failure (not mistaken for "no documents indexed", which is a 422 with a
+  // specific `detail`), surfaces the same retryable inline error, and never
+  // leaves the composer disabled or the question lost.
+  it("treats the gemini-not-configured 503 shape as a plain, retryable send failure rather than crashing or misreading it as no-documents-indexed", async () => {
+    mockedListThreads.mockResolvedValue([]);
+    mockedCreateThread.mockResolvedValue({
+      id: "t-new",
+      title: "New conversation",
+      created_at: "2026-10-16T10:00:00Z",
+    });
+    mockedPostMessage.mockRejectedValue(new ApiError(503, "", "POST failed: 503"));
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("No conversations yet");
+    const composer = screen.getByLabelText(/ask a question/i) as HTMLTextAreaElement;
+    await user.type(composer, "Anything in the library?");
+    await user.click(screen.getByRole("button", { name: /^send/i }));
+
+    await screen.findByText(/couldn't send that question/i);
+    expect(screen.queryByText(/no documents indexed yet/i)).not.toBeInTheDocument();
+    expect(composer.value).toBe("Anything in the library?");
+    expect(composer).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: /^send/i })).not.toBeDisabled();
+  });
+
   it("shows an inline error, restores the failed question into the composer, and keeps earlier messages intact on a send failure", async () => {
     mockedListThreads.mockResolvedValue([
       { id: "t-1", title: "Laptops", last_active_at: "2026-10-16T10:00:00Z" },

@@ -26,6 +26,22 @@ def test_health_reports_ok() -> None:
     assert body["services"] == {"minio": False, "gemini": False}
 
 
+def test_health_reports_true_for_each_service_once_its_env_var_is_set(monkeypatch) -> None:
+    """`configured_services()` only ever reported `False` in the suite above
+    because neither env var is set in the test environment -- that leaves its
+    one other branch, reporting `True` once a connection variable *is* set,
+    with no coverage anywhere. `/health` never actually calls either
+    service, so setting the env vars to any non-empty value is enough to
+    prove this without reaching Gemini or MinIO."""
+    monkeypatch.setenv("MINIO_ENDPOINT", "http://minio:9000")
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-looking-key")
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["services"] == {"minio": True, "gemini": True}
+
+
 def test_the_openapi_document_builds() -> None:
     """Every generated route contributes to the schema, so a route whose types
     FastAPI cannot resolve fails here rather than on a user's first request."""

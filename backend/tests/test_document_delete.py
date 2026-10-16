@@ -125,6 +125,37 @@ def test_delete_unknown_document_id_returns_404(client) -> None:
     assert response.status_code == 404
 
 
+def test_deleting_the_same_document_twice_returns_404_on_the_second_call_not_500(
+    client, db_session
+) -> None:
+    """Nothing about "no undo" should mean a second DELETE on an id that is
+    already gone crashes the server -- it is just another unknown id."""
+    document = _seed_ready_document_with_chunks(db_session, chunk_count=1)
+
+    first = client.delete(f"/documents/{document.id}")
+    second = client.delete(f"/documents/{document.id}")
+
+    assert first.status_code == 204
+    assert second.status_code == 404
+
+
+def test_status_endpoint_reports_404_for_a_document_deleted_moments_ago(client, db_session) -> None:
+    """A poller that was mid-flight when the document was deleted must see
+    "not found", not a stale or empty success response, the next time it
+    checks -- the status route has no special case for a ghost id."""
+    document = _seed_ready_document_with_chunks(db_session, chunk_count=2)
+
+    pre_delete_status = client.get(f"/documents/{document.id}/status")
+    assert pre_delete_status.status_code == 200
+    assert pre_delete_status.json()["status"] == "ready"
+
+    delete_response = client.delete(f"/documents/{document.id}")
+    assert delete_response.status_code == 204
+
+    post_delete_status = client.get(f"/documents/{document.id}/status")
+    assert post_delete_status.status_code == 404
+
+
 # --- AC-018: deleting a document mid-indexing aborts ingestion -------------
 
 
