@@ -167,9 +167,7 @@ def test_list_documents_exposes_required_fields_and_is_identical_for_every_clien
 
 
 def test_every_documents_route_succeeds_with_no_authentication(client) -> None:
-    upload_response = client.post(
-        "/documents", files=[_file("open.txt", TXT_BYTES, "text/plain")]
-    )
+    upload_response = client.post("/documents", files=[_file("open.txt", TXT_BYTES, "text/plain")])
     assert upload_response.status_code not in (401, 403)
     document_id = upload_response.json()["accepted"][0]["id"]
 

@@ -298,7 +298,8 @@ export default function Screen() {
       pushNotice({
         tone: "error",
         title: "Couldn't delete " + doc.file_name,
-        detail: "The server didn't confirm the deletion. The document is still in the library — try again.",
+        detail:
+          "The server didn't confirm the deletion. The document is still in the library — try again.",
       });
     } finally {
       setDeletingId(null);
