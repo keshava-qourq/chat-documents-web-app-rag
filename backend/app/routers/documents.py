@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from sqlalchemy.orm import Session
 
 from app import storage
-from app.config import MAX_UPLOAD_FILE_BYTES, rate_limit_uploads_per_hour
+from app.config import MAX_UPLOAD_FILE_BYTES, document_cap, rate_limit_uploads_per_hour
 from app.database import get_db
 from app.models import Document
 from app.rate_limit import limiter
@@ -37,6 +37,13 @@ _TOO_LARGE_REASON = "File exceeds the 25 MB limit."
 _STORAGE_FAILURE_REASON = "Could not store file; please try again."
 
 
+def _cap_full_reason() -> str:
+    return (
+        f"The library is full ({document_cap()} document limit). "
+        "Delete an existing document before uploading a new one."
+    )
+
+
 @router.post("/documents", response_model=UploadResponse)
 @limiter.limit(lambda: f"{rate_limit_uploads_per_hour()}/hour")
 async def upload_documents(
@@ -49,6 +56,17 @@ async def upload_documents(
 
     for upload in files:
         file_name = upload.filename or "unnamed"
+
+        # Cap check runs before any extraction, storage write or background
+        # task is scheduled -- a full library rejects a file regardless of
+        # whether it would otherwise have been valid. Read live so a delete
+        # that happened moments ago, or an acceptance earlier in this same
+        # batch, is reflected immediately.
+        if db.query(Document).count() >= document_cap():
+            rejected.append(DocumentRejected(file_name=file_name, reason=_cap_full_reason()))
+            await upload.close()
+            continue
+
         extension = Path(file_name).suffix.lower()
 
         if extension not in ALLOWED_EXTENSIONS:
