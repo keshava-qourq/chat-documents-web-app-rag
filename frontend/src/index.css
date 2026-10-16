@@ -1,9 +1,9 @@
 @import "tailwindcss";
 
 :root {
-  --brand-primary: #C2410C;
-  --brand-accent: #0E7490;
-  --brand-neutral: #78716C;
+  --brand-primary: #c2410c;
+  --brand-accent: #0e7490;
+  --brand-neutral: #78716c;
   --brand-radius: 0.5rem;
   --brand-font-heading: Inter, system-ui, sans-serif;
   --brand-font-body: Inter, system-ui, sans-serif;
@@ -12,7 +12,16 @@
   --brand-fg: #0f172a;
   --brand-fg-muted: #64748b;
   --brand-hover: #f1f5f9;
-  --brand-background: #FFFBF2;
+  --brand-background: #fffbf2;
+}
+
+html,
+body {
+  /* The shell is the two-area layout (chat+sidebar, documents) on every
+     breakpoint down to 375px; nothing in it should force a horizontal
+     scrollbar on a narrow viewport (AC-059). */
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 body {
