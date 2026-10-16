@@ -121,9 +121,7 @@ def trim_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
 def has_ready_documents(db: Session) -> bool:
     """`True` once at least one document in the shared library is `'ready'`.
 
-    Cheap existence query -- never embeds or calls Gemini -- so the chat
-    endpoint can answer the NO_DOCUMENTS_INDEXED contract before any stream
-    starts and before any Gemini call is made.
+    Cheap existence query -- never embeds or calls Gemini.
     """
     return db.query(Document.id).filter(Document.status == "ready").first() is not None
 
@@ -175,6 +173,12 @@ def request_answer(
     interrupted after at least one token was produced, the partial answer is
     persisted with status='incomplete' and an 'error' event is emitted
     instead -- either way, the thread accepts another question afterwards.
+
+    When the shared library has no `'ready'` document at all, a canned
+    "no indexed documents" message is streamed back but never persisted as
+    an assistant turn: there is nothing grounded to say yet, so the thread
+    is left holding only the user's own question, ready to answer for real
+    the moment a document finishes indexing.
     """
     trimmed_history = trim_history(history)
 
@@ -184,10 +188,17 @@ def request_answer(
         yield _sse("error", {"detail": "Could not retrieve context for this question."})
         return
 
+    if not context.has_ready_documents:
+        yield _sse("token", {"text": NO_DOCUMENTS_MESSAGE})
+        yield _sse("final", {"message_id": None, "citations": []})
+        return
+
     if not context.chunks:
-        # Covers both "no ready documents" and "nothing above threshold" --
-        # the same user-facing outcome as `generate_answer`'s no-context
-        # branch, and neither spends a generation call.
+        # Ready documents exist, but nothing scored above threshold for this
+        # question -- the same user-facing outcome as `generate_answer`'s
+        # no-context branch, and it still spends no generation call, but
+        # here there is a real (if empty) answer worth keeping in the
+        # thread's history.
         message = Message(
             thread_id=thread.id,
             role="assistant",

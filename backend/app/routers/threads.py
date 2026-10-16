@@ -8,6 +8,13 @@ retrieval, the streaming Gemini call, and persisting the completed (or
 interrupted) assistant turn; this module's job is to validate the request,
 persist the user's turn, and hand both the question and the thread's own
 prior turns to that seam before returning its generator as the stream body.
+
+Posting a question never depends on any document already being indexed:
+`request_answer` itself covers the empty-library case (and the
+nothing-above-threshold case) by yielding its own canned, ungrounded answer
+without ever calling Gemini -- so the user's turn is always persisted and
+the thread is always usable, whether or not the shared library has anything
+in it yet.
 """
 
 import uuid
@@ -31,12 +38,11 @@ from app.schemas import (
     ThreadRenameResponse,
     ThreadSummary,
 )
-from app.services import derive_title, has_ready_documents, request_answer
+from app.services import derive_title, request_answer
 
 router = APIRouter(tags=["threads"])
 
 _THREAD_NOT_FOUND = "Thread not found"
-_NO_DOCUMENTS_INDEXED = "NO_DOCUMENTS_INDEXED"
 
 
 @router.get("/threads", response_model=list[ThreadSummary])
@@ -128,12 +134,6 @@ async def post_message(
     thread = db.get(Thread, thread_id)
     if thread is None:
         raise HTTPException(status_code=404, detail=_THREAD_NOT_FOUND)
-
-    # Checked before any row is written and before any Gemini call -- an
-    # empty shared library is a 422 the frontend already knows how to show,
-    # not a stream that starts and immediately says so.
-    if not has_ready_documents(db):
-        raise HTTPException(status_code=422, detail=_NO_DOCUMENTS_INDEXED)
 
     earlier_messages = (
         db.query(Message)

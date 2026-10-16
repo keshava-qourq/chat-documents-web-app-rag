@@ -175,14 +175,22 @@ def test_rename_unknown_thread_id_returns_404(client) -> None:
 
 def test_delete_returns_204_and_removes_all_messages_and_citations(client, db_session) -> None:
     thread_id = client.post("/threads").json()["id"]
-    message_response = client.post(
+    client.post(
         f"/threads/{thread_id}/messages", json={"question": "Where is the expenses policy?"}
     )
-    message_id = message_response.json()["id"]
+    # The streamed response body is SSE, not JSON, so the user message's id
+    # is read directly from the database this thread was persisted to,
+    # rather than parsed off the response -- the same place a second client
+    # instance would have to look it up from too.
+    message = (
+        db_session.query(Message)
+        .filter(Message.thread_id == uuid.UUID(thread_id), Message.role == "user")
+        .one()
+    )
     db_session.add(
         Citation(
             id=uuid.uuid4(),
-            message_id=uuid.UUID(message_id),
+            message_id=message.id,
             chunk_id=None,
             document_name="handbook.pdf",
             source_location="p.3",

@@ -49,11 +49,21 @@ def _reset_limiter_state():
 
 @pytest.fixture()
 def request_answer_spy(monkeypatch):
+    """Replaces the real `request_answer` seam with a spy matching its real
+    call signature (`db, thread, question, history`), so the router's own
+    call to it -- unchanged by this fixture -- keeps working exactly as it
+    does against the real implementation. It is itself a generator function
+    (it contains `yield`), so calling it does nothing until the router's
+    `StreamingResponse` actually iterates it; iterating it records the call
+    and then stops immediately, producing an empty but valid SSE body and a
+    normal 200 response, without ever reaching Gemini.
+    """
     calls: list[tuple[str, list[dict[str, str]]]] = []
 
-    def fake_request_answer(question, context):
-        calls.append((question, context))
-        return None
+    def fake_request_answer(db, thread, question, history):
+        calls.append((question, history))
+        return
+        yield  # pragma: no cover -- makes this a generator function
 
     monkeypatch.setattr(threads_router, "request_answer", fake_request_answer)
     return calls
