@@ -38,9 +38,7 @@ test.describe("AC-060: English-only, neutral styling, no language switcher", () 
     }
 
     await page.getByLabel("Main navigation").getByText("Documents", { exact: true }).click();
-    await expect(
-      page.locator('[aria-label*="language" i], select[name*="lang" i]'),
-    ).toHaveCount(0);
+    await expect(page.locator('[aria-label*="language" i], select[name*="lang" i]')).toHaveCount(0);
   });
 
   test("renders on a plain light background with no unstyled or dark theme applied", async ({
