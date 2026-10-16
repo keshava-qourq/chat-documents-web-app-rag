@@ -91,3 +91,78 @@ export async function uploadDocuments(files: File[]): Promise<UploadResponse> {
   }
   return (await response.json()) as UploadResponse;
 }
+
+// --- threads and messages ------------------------------------------------------
+
+export interface ThreadSummary {
+  id: string;
+  title: string;
+  last_active_at: string;
+}
+
+export interface ThreadCreated {
+  id: string;
+  title: string;
+  created_at: string;
+}
+
+export interface ThreadRenameResponse {
+  id: string;
+  title: string;
+}
+
+export interface CitationRecord {
+  id: string;
+  document_name: string;
+  source_location: string | null;
+  excerpt: string;
+}
+
+export interface MessageRecord {
+  id: string;
+  role: string;
+  content: string;
+  status: string;
+  citations: CitationRecord[];
+}
+
+export interface ThreadDetail {
+  id: string;
+  title: string;
+  messages: MessageRecord[];
+}
+
+export interface MessageStreamFinal {
+  message_id: string;
+  citations: CitationRecord[];
+}
+
+export function listThreads(): Promise<ThreadSummary[]> {
+  return apiFetch<ThreadSummary[]>("/threads");
+}
+
+export function createThread(): Promise<ThreadCreated> {
+  return apiFetch<ThreadCreated>("/threads", { method: "POST" });
+}
+
+export function getThread(id: string): Promise<ThreadDetail> {
+  return apiFetch<ThreadDetail>(`/threads/${id}`);
+}
+
+export function renameThread(id: string, title: string): Promise<ThreadRenameResponse> {
+  return apiFetch<ThreadRenameResponse>(`/threads/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteThread(id: string): Promise<void> {
+  return apiFetch<void>(`/threads/${id}`, { method: "DELETE" });
+}
+
+export function postMessage(id: string, question: string): Promise<MessageStreamFinal> {
+  return apiFetch<MessageStreamFinal>(`/threads/${id}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
+}
