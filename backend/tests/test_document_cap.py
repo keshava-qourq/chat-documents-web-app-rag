@@ -54,9 +54,7 @@ def test_upload_rejected_with_library_full_reason_once_cap_reached(
     assert "delete" in reason
 
 
-def test_cap_applies_within_the_same_batch_once_reached(
-    client, db_session, monkeypatch
-) -> None:
+def test_cap_applies_within_the_same_batch_once_reached(client, db_session, monkeypatch) -> None:
     monkeypatch.setenv("DOCUMENT_CAP", "2")
     _seed_documents(db_session, 1)
 
@@ -97,7 +95,9 @@ def test_cap_rejected_file_creates_no_document_row_and_no_chunks(
 
     listed_names = {item["file_name"] for item in client.get("/documents").json()}
     assert "never-ingested.txt" not in listed_names
-    assert db_session.query(Document).filter(Document.file_name == "never-ingested.txt").count() == 0
+    assert (
+        db_session.query(Document).filter(Document.file_name == "never-ingested.txt").count() == 0
+    )
     # No document row means nothing for the ingestion pipeline to ever pick
     # up for this file, and it leaves no chunk rows behind either.
     assert db_session.query(Chunk).count() == 0
@@ -130,9 +130,7 @@ def test_deleting_a_document_at_cap_immediately_re_enables_uploading(
 # --- default cap and env override -------------------------------------------
 
 
-def test_default_cap_applies_when_document_cap_env_unset(
-    client, db_session, monkeypatch
-) -> None:
+def test_default_cap_applies_when_document_cap_env_unset(client, db_session, monkeypatch) -> None:
     monkeypatch.delenv("DOCUMENT_CAP", raising=False)
     _seed_documents(db_session, DOCUMENT_CAP_DEFAULT)
 
@@ -143,9 +141,7 @@ def test_default_cap_applies_when_document_cap_env_unset(
     assert "full" in body["rejected"][0]["reason"].lower()
 
 
-def test_overridden_document_cap_env_value_is_honoured(
-    client, db_session, monkeypatch
-) -> None:
+def test_overridden_document_cap_env_value_is_honoured(client, db_session, monkeypatch) -> None:
     monkeypatch.setenv("DOCUMENT_CAP", "5")
     _seed_documents(db_session, 4)
 
