@@ -9,13 +9,43 @@
 // fallback is the local backend so a bare `npm run dev` still points somewhere real.
 export const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
+/**
+ * A failed API call, carrying the HTTP status and (when the backend sent one)
+ * the FastAPI-style `{"detail": "..."}` body alongside the generic message.
+ * Screens that need to distinguish *why* a call failed -- e.g. the chat
+ * screen telling a "no documents indexed yet" rejection apart from a plain
+ * server error -- read `status`/`detail` rather than parsing `message`.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
   if (!response.ok) {
-    throw new Error(`${init?.method ?? "GET"} ${path} failed: ${response.status}`);
+    let detail = "";
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      detail = typeof body?.detail === "string" ? body.detail : "";
+    } catch {
+      // No JSON body (or an unparsable one) -- detail stays empty.
+    }
+    throw new ApiError(
+      response.status,
+      detail,
+      `${init?.method ?? "GET"} ${path} failed: ${response.status}`,
+    );
   }
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
 }
@@ -165,4 +195,18 @@ export function postMessage(id: string, question: string): Promise<MessageStream
     method: "POST",
     body: JSON.stringify({ question }),
   });
+}
+
+/**
+ * Whether a failed `postMessage` call failed because the shared library has
+ * no indexed documents to search, rather than some other server error.
+ *
+ * Mocked pending CHAT8EED1A-12-2: the backend does not yet implement
+ * grounded answer generation (`app.services.request_answer` is a no-op
+ * stub), so this contract -- HTTP 422 with `detail: "NO_DOCUMENTS_INDEXED"`
+ * -- is this screen's expectation of what that story will return, not yet
+ * an observed response. Update this check if the landed contract differs.
+ */
+export function isNoDocumentsIndexedError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 422 && error.detail === "NO_DOCUMENTS_INDEXED";
 }
