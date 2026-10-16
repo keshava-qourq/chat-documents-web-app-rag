@@ -27,8 +27,7 @@ from app.extraction import extract_fragments
 from app.models import Chunk, Document
 
 NO_TEXT_REASON = (
-    "No text could be extracted from this file. Scanned or image-only "
-    "documents are not supported."
+    "No text could be extracted from this file. Scanned or image-only documents are not supported."
 )
 CONFIGURATION_REASON = "Gemini is not configured; set GEMINI_API_KEY to enable indexing."
 EMBEDDING_FAILURE_REASON = "embedding service error"

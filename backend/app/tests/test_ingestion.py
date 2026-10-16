@@ -237,11 +237,7 @@ def _make_document(db_session, file_name: str, storage_key: str) -> models.Docum
 
 
 def _chunk_count(db_session, document_id) -> int:
-    return (
-        db_session.query(models.Chunk)
-        .filter(models.Chunk.document_id == document_id)
-        .count()
-    )
+    return db_session.query(models.Chunk).filter(models.Chunk.document_id == document_id).count()
 
 
 def test_ingest_document_success_stores_chunks_and_marks_ready(
@@ -253,9 +249,7 @@ def test_ingest_document_success_stores_chunks_and_marks_ready(
     fake_store["doc1.txt"] = b"abcdefghijklmnopqrstuvwxyz"
     document = _make_document(db_session, "doc1.txt", "doc1.txt")
 
-    monkeypatch.setattr(
-        ingestion, "embed_texts", lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
-    )
+    monkeypatch.setattr(ingestion, "embed_texts", lambda texts: [[0.1, 0.2, 0.3] for _ in texts])
 
     ingestion.ingest_document(document.id, db_session)
 
