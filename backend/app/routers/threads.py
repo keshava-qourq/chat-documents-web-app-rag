@@ -2,16 +2,19 @@
 
 Everything here runs in one shared workspace -- there is no owner column and
 no per-caller filtering anywhere in this module, and no route requires
-authentication. Grounded answer generation (retrieval, the Gemini call, SSE
-streaming, persisting an assistant message with citations) is a later story;
-this module persists the user's turn and hands it to `app.services
-.request_answer`, the seam that story fills in.
+authentication. `POST /threads/{id}/messages` streams its grounded answer as
+Server-Sent Events: `app.services.request_answer` is the seam that does the
+retrieval, the streaming Gemini call, and persisting the completed (or
+interrupted) assistant turn; this module's job is to validate the request,
+persist the user's turn, and hand both the question and the thread's own
+prior turns to that seam before returning its generator as the stream body.
 """
 
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.config import rate_limit_chat_per_minute
@@ -19,6 +22,7 @@ from app.database import get_db
 from app.models import Message, Thread
 from app.rate_limit import limiter
 from app.schemas import (
+    CitationOut,
     MessageCreateRequest,
     MessageOut,
     ThreadCreated,
@@ -27,11 +31,12 @@ from app.schemas import (
     ThreadRenameResponse,
     ThreadSummary,
 )
-from app.services import derive_title, request_answer
+from app.services import derive_title, has_ready_documents, request_answer
 
 router = APIRouter(tags=["threads"])
 
 _THREAD_NOT_FOUND = "Thread not found"
+_NO_DOCUMENTS_INDEXED = "NO_DOCUMENTS_INDEXED"
 
 
 @router.get("/threads", response_model=list[ThreadSummary])
@@ -66,7 +71,16 @@ async def get_thread(
     return ThreadDetail(
         id=thread.id,
         title=thread.title,
-        messages=[MessageOut.model_validate(m) for m in messages],
+        messages=[
+            MessageOut(
+                id=m.id,
+                role=m.role,
+                content=m.content,
+                status=m.status,
+                citations=[CitationOut.from_citation(c) for c in m.citations],
+            )
+            for m in messages
+        ],
     )
 
 
@@ -103,17 +117,23 @@ async def delete_thread(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/threads/{thread_id}/messages", response_model=MessageOut)
+@router.post("/threads/{thread_id}/messages")
 @limiter.limit(lambda: f"{rate_limit_chat_per_minute()}/minute")
 async def post_message(
     thread_id: uuid.UUID,
     body: MessageCreateRequest,
     request: Request,
     db: Session = Depends(get_db),  # noqa: B008
-) -> Message:
+) -> StreamingResponse:
     thread = db.get(Thread, thread_id)
     if thread is None:
         raise HTTPException(status_code=404, detail=_THREAD_NOT_FOUND)
+
+    # Checked before any row is written and before any Gemini call -- an
+    # empty shared library is a 422 the frontend already knows how to show,
+    # not a stream that starts and immediately says so.
+    if not has_ready_documents(db):
+        raise HTTPException(status_code=422, detail=_NO_DOCUMENTS_INDEXED)
 
     earlier_messages = (
         db.query(Message)
@@ -121,7 +141,7 @@ async def post_message(
         .order_by(Message.created_at.asc())
         .all()
     )
-    context = [{"role": m.role, "content": m.content} for m in earlier_messages]
+    history = [{"role": m.role, "content": m.content} for m in earlier_messages]
 
     message = Message(thread_id=thread.id, role="user", content=body.question)
     db.add(message)
@@ -134,6 +154,5 @@ async def post_message(
     db.commit()
     db.refresh(message)
 
-    request_answer(body.question, context)
-
-    return message
+    event_stream = request_answer(db, thread, body.question, history)
+    return StreamingResponse(event_stream, media_type="text/event-stream")

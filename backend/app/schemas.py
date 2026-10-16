@@ -8,6 +8,7 @@ until it has been implemented.
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -105,6 +106,22 @@ class CitationOut(BaseModel):
     document_name: str
     source_location: str | None = None
     excerpt: str
+    # Derived from the persisted `Citation.chunk_id` -- `NULL` once the
+    # backing chunk (or its whole document) has since been deleted, via the
+    # model's `ondelete="SET NULL"`. Not an ORM attribute, so routes build
+    # this explicitly with `from_citation` rather than relying on
+    # `from_attributes` to find it on the `Citation` row.
+    document_available: bool = True
+
+    @classmethod
+    def from_citation(cls, citation: Any) -> "CitationOut":
+        return cls(
+            id=citation.id,
+            document_name=citation.document_name,
+            source_location=citation.source_location,
+            excerpt=citation.excerpt,
+            document_available=citation.chunk_id is not None,
+        )
 
 
 class MessageOut(BaseModel):

@@ -115,7 +115,7 @@ describe("Chat screen — live threads API", () => {
     expect(await screen.findByText("No conversations yet")).toBeInTheDocument();
   });
 
-  it("loads a thread via GET /threads/{id} and renders questions, answers and citations in order", async () => {
+  it("loads a thread via GET /threads/{id} and renders questions, answers and citations in order, with citations collapsed until expanded", async () => {
     mockedListThreads.mockResolvedValue([
       { id: "t-1", title: "Parental leave", last_active_at: "2026-10-16T10:00:00Z" },
     ]);
@@ -135,6 +135,7 @@ describe("Chat screen — live threads API", () => {
               document_name: "Handbook.pdf",
               source_location: "page 3",
               excerpt: "Top-up is 100%.",
+              document_available: true,
             },
           ],
         },
@@ -150,8 +151,205 @@ describe("Chat screen — live threads API", () => {
     await waitFor(() => expect(mockedGetThread).toHaveBeenCalledWith("t-1"));
     expect(await screen.findByText("How much top-up?")).toBeInTheDocument();
     expect(await screen.findByText("Here is the answer.")).toBeInTheDocument();
-    expect(screen.getByText(/Handbook\.pdf/)).toBeInTheDocument();
+
+    const citationToggle = screen.getByRole("button", { name: /Handbook\.pdf/ });
+    expect(citationToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Top-up is 100%.")).not.toBeInTheDocument();
+
+    await user.click(citationToggle);
+    expect(citationToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Top-up is 100%.")).toBeInTheDocument();
+    expect(screen.getByText("Here is the answer.")).toBeInTheDocument();
+
+    await user.click(citationToggle);
+    expect(citationToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Top-up is 100%.")).not.toBeInTheDocument();
+    expect(screen.getByText("Here is the answer.")).toBeInTheDocument();
+  });
+
+  it("expands a citation to show the excerpt via the keyboard", async () => {
+    mockedListThreads.mockResolvedValue([
+      { id: "t-1", title: "Keyboard thread", last_active_at: "2026-10-16T10:00:00Z" },
+    ]);
+    mockedGetThread.mockResolvedValue({
+      id: "t-1",
+      title: "Keyboard thread",
+      messages: [
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "Answer.",
+          status: "complete",
+          citations: [
+            {
+              id: "c-1",
+              document_name: "Policy.pdf",
+              source_location: "page 1",
+              excerpt: "Keyboard-reachable excerpt.",
+              document_available: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("Keyboard thread");
+    await user.click(screen.getByRole("button", { name: "Keyboard thread" }));
+    await screen.findByText("Answer.");
+
+    const citationToggle = screen.getByRole("button", { name: /Policy\.pdf/ });
+    citationToggle.focus();
+    expect(citationToggle).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    expect(citationToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Keyboard-reachable excerpt.")).toBeInTheDocument();
+  });
+
+  it("states the source document is no longer in the library when document_available is false", async () => {
+    mockedListThreads.mockResolvedValue([
+      { id: "t-1", title: "Missing doc", last_active_at: "2026-10-16T10:00:00Z" },
+    ]);
+    mockedGetThread.mockResolvedValue({
+      id: "t-1",
+      title: "Missing doc",
+      messages: [
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "Answer here.",
+          status: "complete",
+          citations: [
+            {
+              id: "c-1",
+              document_name: "Deleted.pdf",
+              source_location: "page 9",
+              excerpt: "",
+              document_available: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("Missing doc");
+    await user.click(screen.getByRole("button", { name: "Missing doc" }));
+    await screen.findByText("Answer here.");
+
+    const citationToggle = screen.getByRole("button", { name: /Deleted\.pdf/ });
+    await user.click(citationToggle);
+
+    expect(screen.getByText(/no longer in the library/i)).toBeInTheDocument();
+  });
+
+  it("shows a 'did not finish' note with a way to ask again for an incomplete assistant message, and keeps the composer usable", async () => {
+    mockedListThreads.mockResolvedValue([
+      { id: "t-1", title: "Unfinished", last_active_at: "2026-10-16T10:00:00Z" },
+    ]);
+    mockedGetThread.mockResolvedValue({
+      id: "t-1",
+      title: "Unfinished",
+      messages: [
+        { id: "m-1", role: "user", content: "What happened?", status: "complete", citations: [] },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "",
+          status: "incomplete",
+          citations: [],
+        },
+      ],
+    });
+    mockedPostMessage.mockResolvedValue({ message_id: "m-3", citations: [] });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("Unfinished");
+    await user.click(screen.getByRole("button", { name: "Unfinished" }));
+
+    expect(await screen.findByText(/did not finish/i)).toBeInTheDocument();
+    const composer = screen.getByLabelText(/ask a question/i) as HTMLTextAreaElement;
+    expect(composer).not.toBeDisabled();
+
+    mockedGetThread.mockResolvedValue({
+      id: "t-1",
+      title: "Unfinished",
+      messages: [
+        { id: "m-1", role: "user", content: "What happened?", status: "complete", citations: [] },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "",
+          status: "incomplete",
+          citations: [],
+        },
+        { id: "m-3", role: "assistant", content: "Now it finished.", status: "complete", citations: [] },
+      ],
+    });
+
+    await user.click(screen.getByRole("button", { name: /ask again/i }));
+    await waitFor(() => expect(mockedPostMessage).toHaveBeenCalledWith("t-1", "What happened?", expect.any(Function)));
+    expect(await screen.findByText("Now it finished.")).toBeInTheDocument();
+  });
+
+  it("renders assistant text progressively as token events arrive, then settles on the final persisted message", async () => {
+    mockedListThreads.mockResolvedValue([]);
+    mockedCreateThread.mockResolvedValue({
+      id: "t-new",
+      title: "New conversation",
+      created_at: "2026-10-16T10:00:00Z",
+    });
+
+    let onTokenCallback: ((text: string) => void) | undefined;
+    let resolvePost: (value: { message_id: string; citations: never[] }) => void = () => {};
+    mockedPostMessage.mockImplementation((_id, _question, onToken) => {
+      onTokenCallback = onToken;
+      return new Promise((resolve) => {
+        resolvePost = resolve;
+      });
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("No conversations yet");
+    const composer = screen.getByLabelText(/ask a question/i);
+    await user.type(composer, "Stream this?");
+    await user.click(screen.getByRole("button", { name: /^send/i }));
+
+    await waitFor(() => expect(onTokenCallback).toBeDefined());
+
+    onTokenCallback?.("Hello");
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
+
+    onTokenCallback?.(" world");
+    expect(await screen.findByText("Hello world")).toBeInTheDocument();
+
+    mockedGetThread.mockResolvedValue({
+      id: "t-new",
+      title: "New conversation",
+      messages: [
+        { id: "m-1", role: "user", content: "Stream this?", status: "complete", citations: [] },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "Hello world, fully settled.",
+          status: "complete",
+          citations: [],
+        },
+      ],
+    });
+    resolvePost({ message_id: "m-2", citations: [] });
+
+    expect(await screen.findByText("Hello world, fully settled.")).toBeInTheDocument();
+    expect(screen.queryByText("Hello world")).not.toBeInTheDocument();
   });
 
   it("creates a new thread and posts the first message when sending from the empty composer state", async () => {
@@ -180,7 +378,7 @@ describe("Chat screen — live threads API", () => {
     await user.click(screen.getByRole("button", { name: /^send/i }));
 
     await waitFor(() => expect(mockedCreateThread).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(mockedPostMessage).toHaveBeenCalledWith("t-new", "Hello?"));
+    await waitFor(() => expect(mockedPostMessage).toHaveBeenCalledWith("t-new", "Hello?", expect.any(Function)));
     expect(await screen.findByText("Hi there.")).toBeInTheDocument();
   });
 
@@ -217,7 +415,9 @@ describe("Chat screen — live threads API", () => {
     await user.type(composer, "And desktops?");
     await user.click(screen.getByRole("button", { name: /^send/i }));
 
-    await waitFor(() => expect(mockedPostMessage).toHaveBeenCalledWith("t-1", "And desktops?"));
+    await waitFor(() =>
+      expect(mockedPostMessage).toHaveBeenCalledWith("t-1", "And desktops?", expect.any(Function)),
+    );
     expect(mockedCreateThread).not.toHaveBeenCalled();
   });
 
@@ -502,6 +702,7 @@ describe("Chat screen — live threads API", () => {
       ),
     ).not.toBeInTheDocument();
     expect(composer.value).toBe("And desktops?");
+    expect(composer).not.toBeDisabled();
 
     mockedPostMessage.mockResolvedValue({ message_id: "m-3", citations: [] });
     mockedGetThread.mockResolvedValue({
@@ -521,7 +722,9 @@ describe("Chat screen — live threads API", () => {
     });
 
     await user.click(screen.getByRole("button", { name: /retry/i }));
-    await waitFor(() => expect(mockedPostMessage).toHaveBeenCalledWith("t-1", "And desktops?"));
+    await waitFor(() =>
+      expect(mockedPostMessage).toHaveBeenCalledWith("t-1", "And desktops?", expect.any(Function)),
+    );
     expect(await screen.findAllByText("And desktops?")).not.toHaveLength(0);
   });
 });

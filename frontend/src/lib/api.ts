@@ -146,7 +146,15 @@ export interface CitationRecord {
   document_name: string;
   source_location: string | null;
   excerpt: string;
+  /**
+   * Whether the source document is still in the shared library. Absent on
+   * older/mocked data, which is treated as available (`true`) so existing
+   * fixtures keep working.
+   */
+  document_available?: boolean;
 }
+
+export type MessageStatusValue = "complete" | "incomplete";
 
 export interface MessageRecord {
   id: string;
@@ -190,11 +198,106 @@ export function deleteThread(id: string): Promise<void> {
   return apiFetch<void>(`/threads/${id}`, { method: "DELETE" });
 }
 
-export function postMessage(id: string, question: string): Promise<MessageStreamFinal> {
-  return apiFetch<MessageStreamFinal>(`/threads/${id}/messages`, {
+/**
+ * Parses one `event:`/`data:` block out of a raw SSE record (the text
+ * between two `\n\n` separators). Returns `null` for a block with no
+ * `data:` line (e.g. a bare comment/keepalive).
+ */
+function parseSseRecord(raw: string): { event: string; data: string } | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trim());
+    }
+  }
+  if (dataLines.length === 0) return null;
+  return { event, data: dataLines.join("\n") };
+}
+
+/**
+ * Posts a question and streams the answer back over SSE (via `fetch` +
+ * `ReadableStream` -- no event-source dependency, per constraint).
+ *
+ * `token` events call `onToken` with the incremental text as it arrives so
+ * the caller can render progressively (AC-035). The `final` event's payload
+ * is returned once the stream ends. An `error` event, a non-2xx response
+ * (e.g. 429 rate limiting), or a dropped connection all reject the promise;
+ * callers that already rendered partial tokens are responsible for deciding
+ * what to keep on screen.
+ */
+export async function postMessage(
+  id: string,
+  question: string,
+  onToken?: (text: string) => void,
+): Promise<MessageStreamFinal> {
+  const response = await fetch(`${API_BASE_URL}/threads/${id}/messages`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question }),
   });
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      detail = typeof body?.detail === "string" ? body.detail : "";
+    } catch {
+      // No JSON body (or an unparsable one) -- detail stays empty.
+    }
+    throw new ApiError(
+      response.status,
+      detail,
+      `POST /threads/${id}/messages failed: ${response.status}`,
+    );
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response had no body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: MessageStreamFinal | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let separatorIndex: number;
+    while ((separatorIndex = buffer.indexOf("\n\n")) !== -1) {
+      const raw = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      const record = parseSseRecord(raw);
+      if (!record) continue;
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(record.data);
+      } catch {
+        continue;
+      }
+
+      if (record.event === "token") {
+        const text = (payload as { text?: string }).text ?? "";
+        if (text) onToken?.(text);
+      } else if (record.event === "final") {
+        finalResult = payload as MessageStreamFinal;
+      } else if (record.event === "error") {
+        const detail = (payload as { detail?: string }).detail ?? "Something went wrong.";
+        throw new Error(detail);
+      }
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error("The connection dropped before the answer finished.");
+  }
+  return finalResult;
 }
 
 /**
