@@ -74,9 +74,7 @@ def test_delete_removes_document_row_object_and_chunks_and_omits_it_from_list(
 # --- AC-016: a deleted document's chunks can never back a citation ----------
 
 
-def test_deleted_documents_chunks_are_absent_from_the_whole_chunk_table(
-    client, db_session
-) -> None:
+def test_deleted_documents_chunks_are_absent_from_the_whole_chunk_table(client, db_session) -> None:
     """There is no retrieval endpoint yet, but every retrieval implementation
     this project could write has to start from a query against the `chunks`
     table. Proving no row for the deleted document's id remains there -- for

@@ -128,9 +128,7 @@ def test_delete_removes_document_storage_object_and_chunks(
     assert document.storage_key not in fake_object_store["objects"]
 
     assert db_session.get(Document, document.id) is None
-    remaining_chunks = (
-        db_session.query(Chunk).filter(Chunk.document_id == document.id).count()
-    )
+    remaining_chunks = db_session.query(Chunk).filter(Chunk.document_id == document.id).count()
     assert remaining_chunks == 0
 
     list_response = client.get("/documents")
@@ -143,9 +141,7 @@ def test_delete_removes_document_storage_object_and_chunks(
 # --- AC-017: no auth, no undo, no actor/audit column ------------------------
 
 
-def test_delete_requires_no_authentication_and_leaves_no_audit_columns(
-    client, db_session
-) -> None:
+def test_delete_requires_no_authentication_and_leaves_no_audit_columns(client, db_session) -> None:
     document = _seed_ready_document_with_chunks(db_session, chunk_count=1)
 
     response = client.delete(f"/documents/{document.id}")

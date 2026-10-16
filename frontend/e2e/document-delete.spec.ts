@@ -17,10 +17,13 @@ const DOCUMENT = {
   chunk_count: 7,
 };
 
-async function mockDocumentsApi(page: import("@playwright/test").Page, deleteState: {
-  deleted: boolean;
-  deleteCalls: number;
-}) {
+async function mockDocumentsApi(
+  page: import("@playwright/test").Page,
+  deleteState: {
+    deleted: boolean;
+    deleteCalls: number;
+  },
+) {
   await page.route("**/documents", async (route) => {
     if (route.request().method() !== "GET") {
       await route.continue();
