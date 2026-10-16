@@ -171,7 +171,16 @@ export interface ThreadDetail {
 }
 
 export interface MessageStreamFinal {
-  message_id: string;
+  /**
+   * `null` when the backend's `final` event covers the "no documents
+   * indexed yet" case: `app.services.request_answer` streams its canned
+   * reply back as ordinary `token` events but deliberately never persists
+   * it as a message (there is nothing grounded to save), so there is no
+   * message id to report. `postMessage` below translates that shape into
+   * an `ApiError` the caller already knows how to handle, so this is never
+   * actually seen outside this module.
+   */
+  message_id: string | null;
   citations: CitationRecord[];
 }
 
@@ -223,10 +232,15 @@ function parseSseRecord(raw: string): { event: string; data: string } | null {
  *
  * `token` events call `onToken` with the incremental text as it arrives so
  * the caller can render progressively (AC-035). The `final` event's payload
- * is returned once the stream ends. An `error` event, a non-2xx response
- * (e.g. 429 rate limiting), or a dropped connection all reject the promise;
- * callers that already rendered partial tokens are responsible for deciding
- * what to keep on screen.
+ * is returned once the stream ends -- unless it reports `message_id: null`,
+ * which is how the backend represents "the shared library has no indexed
+ * documents yet" (see `MessageStreamFinal`): that case is raised as an
+ * `ApiError(422, "NO_DOCUMENTS_INDEXED", ...)` instead of resolving, so
+ * callers only ever need `isNoDocumentsIndexedError` to tell it apart from
+ * a real answer. An `error` event, a non-2xx response (e.g. 429 rate
+ * limiting), or a dropped connection all reject the promise too; callers
+ * that already rendered partial tokens are responsible for deciding what to
+ * keep on screen.
  */
 export async function postMessage(
   id: string,
@@ -297,6 +311,9 @@ export async function postMessage(
   if (!finalResult) {
     throw new Error("The connection dropped before the answer finished.");
   }
+  if (finalResult.message_id === null) {
+    throw new ApiError(422, "NO_DOCUMENTS_INDEXED", "No documents are indexed yet.");
+  }
   return finalResult;
 }
 
@@ -304,11 +321,9 @@ export async function postMessage(
  * Whether a failed `postMessage` call failed because the shared library has
  * no indexed documents to search, rather than some other server error.
  *
- * Mocked pending CHAT8EED1A-12-2: the backend does not yet implement
- * grounded answer generation (`app.services.request_answer` is a no-op
- * stub), so this contract -- HTTP 422 with `detail: "NO_DOCUMENTS_INDEXED"`
- * -- is this screen's expectation of what that story will return, not yet
- * an observed response. Update this check if the landed contract differs.
+ * Matches the shape `postMessage` raises when the backend's `final` SSE
+ * event reports `message_id: null` -- `app.services.request_answer`'s
+ * canned, ungrounded reply for a library with no `'ready'` document yet.
  */
 export function isNoDocumentsIndexedError(error: unknown): boolean {
   return (

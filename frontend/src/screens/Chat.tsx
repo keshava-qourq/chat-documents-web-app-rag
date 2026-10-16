@@ -249,8 +249,17 @@ export default function Screen() {
       await fetchThreads();
     } catch (err) {
       if (isNoDocumentsIndexedError(err)) {
-        // Keep the question visible; show the "no documents" message in
-        // place of an answer instead of treating this as a send failure.
+        // Keep the question visible; show the "no documents" banner in
+        // place of an answer. The placeholder assistant bubble streamed the
+        // backend's own canned reply as plain tokens before reporting it
+        // was never persisted (there is nothing grounded to save yet) --
+        // drop that bubble so the banner below is shown instead of an
+        // answer, not alongside one left stuck mid-stream.
+        setActiveThread((prev) =>
+          prev
+            ? { ...prev, messages: prev.messages.filter((m) => m.id !== streamingId) }
+            : prev,
+        );
         setNoDocumentsIndexed(true);
       } else {
         // Covers both a rejected send and a connection dropped mid-stream:

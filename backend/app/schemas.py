@@ -58,6 +58,12 @@ class DocumentOut(BaseModel):
     size_bytes: int
     uploaded_at: datetime
     status: str
+    # Surfaced alongside status so the shared library listing can render a
+    # live progress bar while a document is processing, without the
+    # frontend having to poll `/documents/{id}/status` once per document in
+    # the list -- the same value the ingestion pipeline advances as it
+    # embeds each batch (see `app.ingestion`).
+    progress: int = 0
     failure_reason: str | None = None
     chunk_count: int
 

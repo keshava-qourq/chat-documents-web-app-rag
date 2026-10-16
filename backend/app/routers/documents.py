@@ -125,11 +125,15 @@ async def get_document_status(
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    progress = 100 if document.status in ("ready", "failed") else 0
+    # The ingestion pipeline (`app.ingestion`) advances `document.progress`
+    # from 0 to 99 as it embeds each batch, then sets it to 100 once the
+    # document reaches a terminal status (ready or failed) -- read it
+    # straight through rather than re-deriving it, so a poller actually
+    # sees indexing climb instead of jumping straight from 0 to done.
     return DocumentStatusOut(
         id=document.id,
         status=document.status,
-        progress=progress,
+        progress=document.progress,
         failure_reason=document.failure_reason,
     )
 
