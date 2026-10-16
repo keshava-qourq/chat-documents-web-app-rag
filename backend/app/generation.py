@@ -9,6 +9,12 @@ response; retries follow the same bounded-attempts pattern
 `app.embeddings.embed_texts` already uses, reusing its retry count so the
 two Gemini call sites stay consistent without a second configuration knob.
 
+A key Gemini itself rejects (401/403) is detected the same way
+`app.embeddings` detects it -- it cannot possibly succeed on retry, so it is
+raised immediately as `GeminiKeyRejectedError` naming the upstream status,
+rather than exhausted through every retry attempt and reported as a generic
+`GenerationServiceError`.
+
 `stream_answer` is the streaming counterpart `app.services.request_answer`
 calls for `POST /threads/{id}/messages`: it yields plain-text deltas as
 Gemini produces them instead of returning one complete `GeneratedAnswer`.
@@ -40,9 +46,39 @@ NOT_FOUND_MESSAGE = "This is not found in the uploaded documents."
 class GeminiNotConfiguredError(Exception):
     """Raised when `GEMINI_API_KEY` is unset at the moment generation is needed."""
 
+    code = "gemini_not_configured"
+
+
+class GeminiKeyRejectedError(Exception):
+    """Raised when Gemini itself rejects `GEMINI_API_KEY` (HTTP 401/403)."""
+
+    code = "gemini_key_rejected"
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class GenerationServiceError(Exception):
     """Raised once every retry attempt against Gemini has failed, including timeouts."""
+
+
+def _rejected_status(exc: Exception) -> int | None:
+    """The upstream HTTP status if `exc` looks like Gemini rejecting the API
+    key, else `None`. Same detection `app.embeddings._rejected_status` uses,
+    kept local here rather than imported so this module's only Gemini
+    dependency stays `google-genai` itself.
+    """
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and value in (401, 403):
+            return value
+    message = str(exc).upper()
+    if "401" in message or "UNAUTHENTICATED" in message:
+        return 401
+    if "403" in message or "PERMISSION_DENIED" in message or "API_KEY_INVALID" in message:
+        return 403
+    return None
 
 
 @dataclass
@@ -96,6 +132,12 @@ def generate_answer(
             text = (getattr(result, "text", None) or "").strip()
             break
         except Exception as exc:  # noqa: BLE001 -- any Gemini/network failure is retried
+            status = _rejected_status(exc)
+            if status is not None:
+                raise GeminiKeyRejectedError(
+                    f"GEMINI_API_KEY was rejected by Gemini (status {status})",
+                    status_code=status,
+                ) from exc
             last_error = exc
 
     if text is None:
@@ -126,7 +168,9 @@ def stream_answer(
     chunk has been yielded to the caller, any further failure propagates
     as-is so the caller can treat it as a mid-stream interruption rather
     than silently retrying a request the caller may have already shown
-    partial output for.
+    partial output for. A rejected key is detected the same way as
+    `generate_answer` and raised immediately, before any retry, whether it
+    is the first attempt or a retried one.
     """
     history = history or []
     api_key = gemini_api_key()
@@ -144,6 +188,12 @@ def stream_answer(
             stream = client.models.generate_content_stream(model=GENERATION_MODEL, contents=prompt)
             break
         except Exception as exc:  # noqa: BLE001 -- retried while nothing has streamed yet
+            status = _rejected_status(exc)
+            if status is not None:
+                raise GeminiKeyRejectedError(
+                    f"GEMINI_API_KEY was rejected by Gemini (status {status})",
+                    status_code=status,
+                ) from exc
             last_error = exc
 
     if stream is None:
@@ -212,6 +262,7 @@ __all__ = [
     "Citation",
     "GeneratedAnswer",
     "GeminiNotConfiguredError",
+    "GeminiKeyRejectedError",
     "GenerationServiceError",
     "generate_answer",
     "stream_answer",

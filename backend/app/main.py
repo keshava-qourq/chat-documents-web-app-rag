@@ -8,12 +8,13 @@ OpenAPI document and passes its tests before a single handler is implemented.
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 
-from app import models  # noqa: F401 -- imported so the tables register before create_all
+from app import embeddings, generation, models  # noqa: F401 -- models registers tables
 from app.database import Base, engine
 from app.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import documents, threads
@@ -40,6 +41,37 @@ app = FastAPI(
 # shape or an unhandled exception.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+
+# A missing or Gemini-rejected GEMINI_API_KEY is a configuration error, not a
+# generic 500: both `app.embeddings` and `app.generation` raise their own
+# typed `GeminiNotConfiguredError` / `GeminiKeyRejectedError` (one Gemini
+# call site each) rather than a bare exception, and these handlers are the
+# single place that turns either into the agreed 503 shape --
+# `{"detail": {"code": ..., "message": ...}}` -- naming GEMINI_API_KEY and,
+# for a rejection, the upstream status, with the key value itself never
+# anywhere in the response. Registered for both modules' classes since each
+# keeps its own (mirroring the existing `EmbeddingServiceError` /
+# `GenerationServiceError` split) rather than introducing a shared base type
+# neither module otherwise needs.
+async def _gemini_not_configured_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": "gemini_not_configured", "message": str(exc)}},
+    )
+
+
+async def _gemini_key_rejected_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": "gemini_key_rejected", "message": str(exc)}},
+    )
+
+
+app.add_exception_handler(embeddings.GeminiNotConfiguredError, _gemini_not_configured_handler)
+app.add_exception_handler(generation.GeminiNotConfiguredError, _gemini_not_configured_handler)
+app.add_exception_handler(embeddings.GeminiKeyRejectedError, _gemini_key_rejected_handler)
+app.add_exception_handler(generation.GeminiKeyRejectedError, _gemini_key_rejected_handler)
 
 # The SPA runs on a different origin than the API, so the browser refuses its calls
 # unless that origin is allowed here. In development that is the Vite dev server; when

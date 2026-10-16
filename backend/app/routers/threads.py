@@ -15,6 +15,15 @@ nothing-above-threshold case) by yielding its own canned, ungrounded answer
 without ever calling Gemini -- so the user's turn is always persisted and
 the thread is always usable, whether or not the shared library has anything
 in it yet.
+
+When a `'ready'` document *does* exist, answering the question requires a
+real Gemini call (retrieval's embedding call, then generation), so a missing
+`GEMINI_API_KEY` is checked for here -- before the user's turn is persisted,
+before `request_answer` is ever called, and therefore before any Gemini SDK
+call or file store happens -- and rejected with the operator-facing 503
+config-error shape, rather than being discovered deep inside the SSE stream
+where a structured JSON error can no longer be returned (a stream already in
+progress cannot change its status code).
 """
 
 import uuid
@@ -24,7 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.config import rate_limit_chat_per_minute
+from app.config import gemini_api_key, rate_limit_chat_per_minute
 from app.database import get_db
 from app.models import Message, Thread
 from app.rate_limit import limiter
@@ -38,11 +47,19 @@ from app.schemas import (
     ThreadRenameResponse,
     ThreadSummary,
 )
-from app.services import derive_title, request_answer
+from app.services import derive_title, has_ready_documents, request_answer
 
 router = APIRouter(tags=["threads"])
 
 _THREAD_NOT_FOUND = "Thread not found"
+
+GEMINI_NOT_CONFIGURED_DETAIL = {
+    "code": "gemini_not_configured",
+    "message": (
+        "GEMINI_API_KEY is not set. Set it in the server's environment "
+        "(see README.md) to enable chat answers."
+    ),
+}
 
 
 @router.get("/threads", response_model=list[ThreadSummary])
@@ -134,6 +151,15 @@ async def post_message(
     thread = db.get(Thread, thread_id)
     if thread is None:
         raise HTTPException(status_code=404, detail=_THREAD_NOT_FOUND)
+
+    # A real answer needs a real Gemini call (retrieval's embedding, then
+    # generation) only once a 'ready' document exists; with none yet,
+    # `request_answer` returns its own canned, Gemini-free answer, so there
+    # is nothing to configure-check against. Checked -- and rejected, with
+    # no Gemini SDK call and no user turn persisted yet -- before anything
+    # else happens.
+    if has_ready_documents(db) and not gemini_api_key():
+        raise HTTPException(status_code=503, detail=GEMINI_NOT_CONFIGURED_DETAIL)
 
     earlier_messages = (
         db.query(Message)
