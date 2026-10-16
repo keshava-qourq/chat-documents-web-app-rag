@@ -1,18 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --brand-primary: #2563eb;
-  --brand-accent: #7c3aed;
-  --brand-neutral: #64748b;
+  --brand-primary: #C2410C;
+  --brand-accent: #0E7490;
+  --brand-neutral: #78716C;
   --brand-radius: 0.5rem;
-  --brand-font-heading: system-ui, sans-serif;
-  --brand-font-body: system-ui, sans-serif;
+  --brand-font-heading: Inter, system-ui, sans-serif;
+  --brand-font-body: Inter, system-ui, sans-serif;
   --brand-surface: #ffffff;
   --brand-border: #e2e8f0;
   --brand-fg: #0f172a;
   --brand-fg-muted: #64748b;
   --brand-hover: #f1f5f9;
-  --brand-background: #ffffff;
+  --brand-background: #FFFBF2;
 }
 
 body {
