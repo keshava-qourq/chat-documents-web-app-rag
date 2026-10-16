@@ -222,4 +222,132 @@ describe("Documents screen — indexing progress and failures", () => {
     await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("doc-4"));
     await waitFor(() => expect(screen.queryByText("policy.docx")).not.toBeInTheDocument());
   });
+
+  it("states the deletion is permanent with no undo, requires no sign-in, and shows no 'deleted by' attribution", async () => {
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-5",
+        file_name: "confidential.pdf",
+        size_bytes: 777,
+        uploaded_at: new Date().toISOString(),
+        status: "ready",
+        progress: 100,
+        failure_reason: null,
+        chunk_count: 3,
+      },
+    ]);
+    mockedDelete.mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("confidential.pdf");
+    expect(screen.queryByText(/sign in/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/log in/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /delete confidential\.pdf/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/no undo/i)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/deleted by/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/sign in/i)).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: /delete permanently/i }));
+
+    await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("doc-5"));
+    await waitFor(() => expect(screen.queryByText("confidential.pdf")).not.toBeInTheDocument());
+    expect(screen.queryByText(/deleted by/i)).not.toBeInTheDocument();
+  });
+
+  it("cancelling the confirmation keeps the document and issues no DELETE request", async () => {
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-6",
+        file_name: "keep-me.pdf",
+        size_bytes: 400,
+        uploaded_at: new Date().toISOString(),
+        status: "ready",
+        progress: 100,
+        failure_reason: null,
+        chunk_count: 2,
+      },
+    ]);
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("keep-me.pdf");
+    await user.click(screen.getByRole("button", { name: /delete keep-me\.pdf/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /keep it/i }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByText("keep-me.pdf")).toBeInTheDocument();
+    expect(mockedDelete).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a non-blocking error when the DELETE request fails, leaving the document in place", async () => {
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-7",
+        file_name: "stubborn.pdf",
+        size_bytes: 900,
+        uploaded_at: new Date().toISOString(),
+        status: "ready",
+        progress: 100,
+        failure_reason: null,
+        chunk_count: 1,
+      },
+    ]);
+    mockedDelete.mockRejectedValue(new Error("DELETE /documents/doc-7 failed: 500"));
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("stubborn.pdf");
+    await user.click(screen.getByRole("button", { name: /delete stubborn\.pdf/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /delete permanently/i }));
+
+    await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("doc-7"));
+    expect(await screen.findByText(/couldn't delete stubborn\.pdf/i)).toBeInTheDocument();
+    expect(screen.getAllByText("stubborn.pdf").length).toBeGreaterThan(0);
+  });
+
+  it("allows deleting a document that is still processing, and its poller stops for that id once deleted", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-8",
+        file_name: "in-progress.pdf",
+        size_bytes: 1200,
+        uploaded_at: new Date().toISOString(),
+        status: "processing",
+        progress: 20,
+        failure_reason: null,
+        chunk_count: 0,
+      },
+    ]);
+    mockedDelete.mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await vi.waitFor(() => expect(mockedList).toHaveBeenCalledTimes(1));
+    await screen.findByText("in-progress.pdf");
+
+    await user.click(screen.getByRole("button", { name: /delete in-progress\.pdf/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /delete permanently/i }));
+
+    await vi.waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("doc-8"));
+    await vi.waitFor(() => expect(screen.queryByText("in-progress.pdf")).not.toBeInTheDocument());
+
+    const callsAfterDelete = mockedList.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(mockedList.mock.calls.length).toBe(callsAfterDelete);
+  });
 });

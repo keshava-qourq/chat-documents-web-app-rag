@@ -13,6 +13,17 @@ usable text (a scanned PDF, an empty file) fails the document without ever
 calling Gemini; an embedding failure after every retry fails the document
 and deletes any chunk rows already written for it, so a failed document never
 has partial chunks a poller or the chat endpoint could stumble on.
+
+Deletion can race a document still being indexed: `DELETE /documents/{id}`
+removes the row (and any chunks already committed for it) from whatever
+session the request runs on, which this function's own session will not see
+until its next query against the database. Rather than killing the
+background task outright -- there is no thread to kill, and nothing here
+assumes it owns one -- the embedding loop re-checks the document still
+exists both before it starts embedding a batch and again right before it
+persists that batch, so a deletion landing at any point in between is
+noticed at the next commit point and the task aborts cleanly, leaving zero
+chunk rows behind for that document id.
 """
 
 from uuid import UUID
@@ -73,8 +84,25 @@ def ingest_document(document_id: UUID, db: Session) -> None:
 
     try:
         for start in range(0, total, batch_size):
+            # Checked immediately before embedding this batch -- a delete
+            # that already landed is caught before spending a Gemini call on
+            # a document that no longer exists.
+            if not _document_still_indexable(db, document_id):
+                _delete_chunks(db, document_id)
+                return
+
             batch = chunks[start : start + batch_size]
             vectors = embed_texts([piece for piece, _location, _index in batch])
+
+            # Checked again right before this batch is persisted -- a delete
+            # that landed while the (possibly slow) embedding call was in
+            # flight must still stop this batch from being committed for a
+            # document that is no longer there.
+            if not _document_still_indexable(db, document_id):
+                db.rollback()
+                _delete_chunks(db, document_id)
+                return
+
             for (piece, location, index), vector in zip(batch, vectors, strict=True):
                 db.add(
                     Chunk(
@@ -106,6 +134,17 @@ def ingest_document(document_id: UUID, db: Session) -> None:
     document.chunk_count = stored
     document.failure_reason = None
     db.commit()
+
+
+def _document_still_indexable(db: Session, document_id: UUID) -> bool:
+    """`False` once the document has been deleted or marked cancelled by a
+    concurrent `DELETE /documents/{id}` -- always issues a fresh query rather
+    than trusting this session's identity map, since the delete happens on a
+    different session."""
+    current = db.query(Document.status).filter(Document.id == document_id).first()
+    if current is None:
+        return False
+    return current[0] != "cancelled"
 
 
 def _read_original(document: Document) -> bytes:
