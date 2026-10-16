@@ -125,9 +125,7 @@ def test_grounded_answer_returns_deduplicated_citations_from_retrieved_chunks_on
     chunk_one = _chunk(source_location="handbook.pdf, page 1")
     chunk_two = _chunk(source_location="handbook.pdf, page 1")  # same (doc, location)
     chunk_three = _chunk(source_location="handbook.pdf, page 2")
-    context = RetrievedContext(
-        chunks=[chunk_one, chunk_two, chunk_three], has_ready_documents=True
-    )
+    context = RetrievedContext(chunks=[chunk_one, chunk_two, chunk_three], has_ready_documents=True)
 
     answer = generation.generate_answer("How many leave days?", context)
 

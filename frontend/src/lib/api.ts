@@ -208,5 +208,7 @@ export function postMessage(id: string, question: string): Promise<MessageStream
  * an observed response. Update this check if the landed contract differs.
  */
 export function isNoDocumentsIndexedError(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 422 && error.detail === "NO_DOCUMENTS_INDEXED";
+  return (
+    error instanceof ApiError && error.status === 422 && error.detail === "NO_DOCUMENTS_INDEXED"
+  );
 }

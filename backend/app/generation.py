@@ -121,7 +121,7 @@ def _build_prompt(
         f"CONTEXT:\n{chunks_block}\n\n"
         f"QUESTION:\n{question}\n\n"
         "Rules:\n"
-        f'- If the context does not cover the question at all, respond with exactly: '
+        f"- If the context does not cover the question at all, respond with exactly: "
         f'"{NOT_FOUND_MESSAGE}" and nothing else.\n'
         "- If the context covers only part of the question, answer the "
         "supported part using the context, citing it, and then explicitly "

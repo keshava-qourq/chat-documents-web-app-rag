@@ -343,7 +343,13 @@ describe("Chat screen — live threads API", () => {
       id: "t-1",
       title: "Expenses",
       messages: [
-        { id: "m-1", role: "user", content: "What's the limit?", status: "complete", citations: [] },
+        {
+          id: "m-1",
+          role: "user",
+          content: "What's the limit?",
+          status: "complete",
+          citations: [],
+        },
         {
           id: "m-2",
           role: "assistant",
@@ -465,7 +471,13 @@ describe("Chat screen — live threads API", () => {
       title: "Laptops",
       messages: [
         { id: "m-1", role: "user", content: "Which laptops?", status: "complete", citations: [] },
-        { id: "m-2", role: "assistant", content: "The Dell XPS.", status: "complete", citations: [] },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "The Dell XPS.",
+          status: "complete",
+          citations: [],
+        },
       ],
     });
     mockedPostMessage.mockRejectedValue(new Error("network down"));
@@ -485,7 +497,9 @@ describe("Chat screen — live threads API", () => {
     expect(screen.getByText("Which laptops?")).toBeInTheDocument();
     expect(screen.getByText("The Dell XPS.")).toBeInTheDocument();
     expect(
-      screen.queryByText((_content, element) => element?.tagName === "P" && element.textContent === "And desktops?"),
+      screen.queryByText(
+        (_content, element) => element?.tagName === "P" && element.textContent === "And desktops?",
+      ),
     ).not.toBeInTheDocument();
     expect(composer.value).toBe("And desktops?");
 
@@ -495,7 +509,13 @@ describe("Chat screen — live threads API", () => {
       title: "Laptops",
       messages: [
         { id: "m-1", role: "user", content: "Which laptops?", status: "complete", citations: [] },
-        { id: "m-2", role: "assistant", content: "The Dell XPS.", status: "complete", citations: [] },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "The Dell XPS.",
+          status: "complete",
+          citations: [],
+        },
         { id: "m-3", role: "user", content: "And desktops?", status: "complete", citations: [] },
       ],
     });
