@@ -138,7 +138,9 @@ def test_a_second_question_leaves_the_title_unchanged(client) -> None:
 def test_rename_stores_and_returns_the_new_title_for_every_caller(client) -> None:
     thread_id = client.post("/threads").json()["id"]
 
-    rename_response = client.patch(f"/threads/{thread_id}", json={"title": "Office holidays policy"})
+    rename_response = client.patch(
+        f"/threads/{thread_id}", json={"title": "Office holidays policy"}
+    )
 
     assert rename_response.status_code == 200
     body = rename_response.json()
@@ -215,10 +217,9 @@ def test_no_thread_route_returns_401_or_403_for_an_unauthenticated_caller(client
 
     assert client.get("/threads").status_code not in (401, 403)
     assert client.get(f"/threads/{thread_id}").status_code not in (401, 403)
-    assert (
-        client.post(f"/threads/{thread_id}/messages", json={"question": "Anything?"}).status_code
-        not in (401, 403)
-    )
+    assert client.post(
+        f"/threads/{thread_id}/messages", json={"question": "Anything?"}
+    ).status_code not in (401, 403)
     assert client.patch(f"/threads/{thread_id}", json={"title": "Renamed"}).status_code not in (
         401,
         403,

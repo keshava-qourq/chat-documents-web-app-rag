@@ -90,7 +90,9 @@ describe("Chat screen — live threads API", () => {
     renderScreen();
     expect(screen.getByText(/loading conversations/i)).toBeInTheDocument();
     resolveList([]);
-    await waitFor(() => expect(screen.queryByText(/loading conversations/i)).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByText(/loading conversations/i)).not.toBeInTheDocument(),
+    );
   });
 
   it("surfaces a sidebar load error with a retry that succeeds", async () => {
@@ -315,7 +317,9 @@ describe("Chat screen — live threads API", () => {
     mockedGetThread.mockResolvedValue({
       id: "t-1",
       title: "Persisted thread",
-      messages: [{ id: "m-1", role: "user", content: "Still here?", status: "complete", citations: [] }],
+      messages: [
+        { id: "m-1", role: "user", content: "Still here?", status: "complete", citations: [] },
+      ],
     });
 
     renderScreen(["/chat?thread=t-1"]);

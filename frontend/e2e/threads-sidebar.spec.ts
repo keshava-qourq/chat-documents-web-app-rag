@@ -228,7 +228,10 @@ test.describe("AC-054: deleting the open thread", () => {
     ).toBeVisible();
 
     await page.getByLabel("Delete Berlin office holidays").click();
-    await page.getByRole("dialog").getByRole("button", { name: /delete permanently/i }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: /delete permanently/i })
+      .click();
 
     await expect(page.getByRole("heading", { name: "Start a new conversation" })).toBeVisible();
     await expect(

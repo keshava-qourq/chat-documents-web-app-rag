@@ -342,8 +342,8 @@ export default function Screen() {
             <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
               <h2 className="text-lg font-semibold text-slate-900">Start a new conversation</h2>
               <p className="max-w-md text-sm text-slate-500">
-                Ask anything about the shared document library. Your question and its answer will
-                be visible to everyone with the link.
+                Ask anything about the shared document library. Your question and its answer will be
+                visible to everyone with the link.
               </p>
               <div className="grid w-full max-w-xl gap-2 sm:grid-cols-2">
                 {STARTERS.map((s) => (
@@ -375,7 +375,10 @@ export default function Screen() {
           ) : activeThread ? (
             <ul className="space-y-6">
               {activeThread.messages.map((m) => (
-                <li key={m.id} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
+                <li
+                  key={m.id}
+                  className={m.role === "user" ? "flex justify-end" : "flex justify-start"}
+                >
                   <div
                     className={cx(
                       "max-w-[85%] rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
@@ -457,7 +460,10 @@ export default function Screen() {
               Delete this conversation?
             </h2>
             <p className="mt-2 text-sm font-medium text-slate-800">{confirmDeleteThread.title}</p>
-            <p id="delete-thread-desc" className="mt-3 flex items-start gap-2 text-sm text-slate-600">
+            <p
+              id="delete-thread-desc"
+              className="mt-3 flex items-start gap-2 text-sm text-slate-600"
+            >
               <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
               This is permanent. There is no undo, and no copy is kept.
             </p>
