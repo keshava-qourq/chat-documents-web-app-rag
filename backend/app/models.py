@@ -51,6 +51,10 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="processing")
+    # Updated as the ingestion pipeline embeds each batch of chunks, so a
+    # poller sees indexing advance rather than jumping straight from 0 to
+    # done. Additive column -- existing rows default to 0 either way.
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     uploaded_at: Mapped[datetime] = mapped_column(

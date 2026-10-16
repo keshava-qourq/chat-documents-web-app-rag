@@ -15,6 +15,16 @@ MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024
 RATE_LIMIT_CHAT_PER_MIN_DEFAULT = 20
 RATE_LIMIT_UPLOADS_PER_HOUR_DEFAULT = 10
 
+# Ingestion pipeline defaults. Chunk size and overlap are measured in
+# characters (not tokens) to keep the splitter dependency-free; 1000/200 is a
+# conservative middle ground that keeps chunks well under Gemini's embedding
+# input limit while still giving retrieval enough overlap to not lose context
+# at a chunk boundary.
+CHUNK_SIZE_DEFAULT = 1000
+CHUNK_OVERLAP_DEFAULT = 200
+EMBEDDING_MAX_RETRIES_DEFAULT = 3
+EMBEDDING_BATCH_SIZE_DEFAULT = 16
+
 
 def gemini_api_key() -> str | None:
     """`None` when Gemini has not been configured yet.
@@ -39,3 +49,23 @@ def rate_limit_chat_per_minute() -> int:
 def rate_limit_uploads_per_hour() -> int:
     """Uploads accepted per IP per hour before the upload endpoint returns 429."""
     return int(os.getenv("RATE_LIMIT_UPLOADS_PER_HOUR", str(RATE_LIMIT_UPLOADS_PER_HOUR_DEFAULT)))
+
+
+def chunk_size() -> int:
+    """Characters per chunk the ingestion pipeline splits extracted text into."""
+    return int(os.getenv("CHUNK_SIZE", str(CHUNK_SIZE_DEFAULT)))
+
+
+def chunk_overlap() -> int:
+    """Characters of overlap kept between consecutive chunks of the same fragment."""
+    return int(os.getenv("CHUNK_OVERLAP", str(CHUNK_OVERLAP_DEFAULT)))
+
+
+def embedding_max_retries() -> int:
+    """Attempts made to embed a batch of chunks before the document is failed."""
+    return int(os.getenv("EMBEDDING_MAX_RETRIES", str(EMBEDDING_MAX_RETRIES_DEFAULT)))
+
+
+def embedding_batch_size() -> int:
+    """Chunks embedded per Gemini call, and the unit the progress field advances by."""
+    return int(os.getenv("EMBEDDING_BATCH_SIZE", str(EMBEDDING_BATCH_SIZE_DEFAULT)))

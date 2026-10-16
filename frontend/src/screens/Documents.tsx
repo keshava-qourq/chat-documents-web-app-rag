@@ -99,6 +99,12 @@ const formatAgo = (s) => {
   return m + "m " + (s % 60) + "s ago";
 };
 
+const clampProgress = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+};
+
 export default function Screen() {
   const navigate = useNavigate();
   const ink = darken(brand.neutralColor, 0.68);
@@ -156,7 +162,10 @@ export default function Screen() {
   }, [fetchDocuments]);
 
   // Real status refresh: while anything is still processing, poll the shared
-  // list so every visitor's screen converges on the same server state.
+  // list so every visitor's screen converges on the same server state. This
+  // stops on its own once every document is terminal (ready or failed) --
+  // no page reload required to see the next progress step or the final
+  // outcome.
   React.useEffect(() => {
     const hasProcessing = docs.some((d) => d.status === "processing");
     if (!hasProcessing) return undefined;
@@ -240,6 +249,7 @@ export default function Screen() {
             size_bytes: d.size_bytes,
             uploaded_at: d.uploaded_at,
             status: d.status,
+            progress: 0,
             failure_reason: null,
             chunk_count: 0,
             isNew: true,
@@ -257,6 +267,9 @@ export default function Screen() {
         });
       }
 
+      // Rejections include the library-is-full case and any other
+      // server-side refusal; the server's own reason text is shown
+      // verbatim rather than re-worded here.
       rejected.forEach((r) =>
         pushNotice({ tone: "error", title: r.file_name + " wasn't uploaded", detail: r.reason }),
       );
@@ -781,6 +794,7 @@ export default function Screen() {
           <ul className="mt-6 grid gap-4 md:grid-cols-2">
             {visible.map((doc) => {
               const meta = statusMeta(doc.status);
+              const progress = clampProgress(doc.progress);
               return (
                 <li
                   key={doc.id}
@@ -842,7 +856,9 @@ export default function Screen() {
                       </span>
                     )}
                     {doc.status === "processing" && (
-                      <span className="text-sm tabular-nums">Embedding with Gemini…</span>
+                      <span className="text-sm tabular-nums">
+                        Embedding with Gemini… {progress}%
+                      </span>
                     )}
                   </div>
 
@@ -856,15 +872,19 @@ export default function Screen() {
                       role="progressbar"
                       aria-valuemin={0}
                       aria-valuemax={100}
-                      aria-label={"Indexing " + doc.file_name}
+                      aria-valuenow={progress}
+                      aria-label={"Indexing " + doc.file_name + ", " + progress + " percent"}
                     >
                       <span
-                        className="nb-pulse block h-full w-full"
-                        style={{ backgroundColor: brand.accentColor }}
+                        className="block h-full"
+                        style={{ width: progress + "%", backgroundColor: brand.accentColor }}
                       />
                     </div>
                   )}
 
+                  {/* A failed document — including a scanned, image-only PDF
+                      that has no extractable text -- shows the server's own
+                      human-readable reason verbatim, and no chunk count. */}
                   {doc.status === "failed" && (
                     <p
                       className="mt-3 px-3 py-2 text-sm leading-relaxed"

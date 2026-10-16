@@ -30,6 +30,7 @@ export interface DocumentRecord {
   size_bytes: number;
   uploaded_at: string;
   status: DocumentStatusValue;
+  progress: number;
   failure_reason: string | null;
   chunk_count: number;
 }

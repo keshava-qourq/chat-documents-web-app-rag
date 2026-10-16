@@ -1,0 +1,225 @@
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { listDocuments, uploadDocuments, deleteDocument } from "@/lib/api";
+import Screen from "./Documents";
+
+vi.mock("@/lib/api", () => ({
+  listDocuments: vi.fn(),
+  uploadDocuments: vi.fn(),
+  deleteDocument: vi.fn(),
+  getDocumentStatus: vi.fn(),
+}));
+
+const mockedList = vi.mocked(listDocuments);
+const mockedUpload = vi.mocked(uploadDocuments);
+const mockedDelete = vi.mocked(deleteDocument);
+
+function renderScreen() {
+  return render(
+    <MemoryRouter>
+      <Screen />
+    </MemoryRouter>,
+  );
+}
+
+describe("Documents screen — indexing progress and failures", () => {
+  beforeEach(() => {
+    mockedList.mockReset();
+    mockedUpload.mockReset();
+    mockedDelete.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders a determinate progress bar from the server progress value with no sample data", async () => {
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-1",
+        file_name: "handbook.pdf",
+        size_bytes: 1024,
+        uploaded_at: new Date().toISOString(),
+        status: "processing",
+        progress: 42,
+        failure_reason: null,
+        chunk_count: 0,
+      },
+    ]);
+
+    renderScreen();
+
+    await waitFor(() => expect(mockedList).toHaveBeenCalledTimes(1));
+
+    const bar = await screen.findByRole("progressbar", { name: /handbook\.pdf/i });
+    expect(bar).toHaveAttribute("aria-valuenow", "42");
+    expect(bar).toHaveAttribute("aria-valuemin", "0");
+    expect(bar).toHaveAttribute("aria-valuemax", "100");
+    expect(screen.getByText(/42%/)).toBeInTheDocument();
+  });
+
+  it("polls while a document is processing, updates aria-valuenow, and stops once terminal", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    mockedList
+      .mockResolvedValueOnce([
+        {
+          id: "doc-1",
+          file_name: "handbook.pdf",
+          size_bytes: 1024,
+          uploaded_at: new Date().toISOString(),
+          status: "processing",
+          progress: 10,
+          failure_reason: null,
+          chunk_count: 0,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "doc-1",
+          file_name: "handbook.pdf",
+          size_bytes: 1024,
+          uploaded_at: new Date().toISOString(),
+          status: "processing",
+          progress: 60,
+          failure_reason: null,
+          chunk_count: 0,
+        },
+      ])
+      .mockResolvedValue([
+        {
+          id: "doc-1",
+          file_name: "handbook.pdf",
+          size_bytes: 1024,
+          uploaded_at: new Date().toISOString(),
+          status: "ready",
+          progress: 100,
+          failure_reason: null,
+          chunk_count: 8,
+        },
+      ]);
+
+    renderScreen();
+
+    await vi.waitFor(() => expect(mockedList).toHaveBeenCalledTimes(1));
+    let bar = await screen.findByRole("progressbar");
+    expect(bar).toHaveAttribute("aria-valuenow", "10");
+
+    await vi.advanceTimersByTimeAsync(4000);
+    await vi.waitFor(() => expect(mockedList).toHaveBeenCalledTimes(2));
+    bar = await screen.findByRole("progressbar");
+    expect(bar).toHaveAttribute("aria-valuenow", "60");
+
+    await vi.advanceTimersByTimeAsync(4000);
+    await vi.waitFor(() => expect(mockedList).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
+
+    const callsAfterTerminal = mockedList.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(mockedList.mock.calls.length).toBe(callsAfterTerminal);
+  });
+
+  it("shows the server-supplied failure reason verbatim and no chunk count", async () => {
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-2",
+        file_name: "contract.pdf",
+        size_bytes: 2048,
+        uploaded_at: new Date().toISOString(),
+        status: "failed",
+        progress: 0,
+        failure_reason: "The embedding model returned a 503 after three retries.",
+        chunk_count: 0,
+      },
+    ]);
+
+    renderScreen();
+
+    expect(
+      await screen.findByText("The embedding model returned a 503 after three retries."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/chunks indexed/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("renders a scanned-PDF failure reason the same way, with no chunk count", async () => {
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-3",
+        file_name: "scanned-invoice.pdf",
+        size_bytes: 3000,
+        uploaded_at: new Date().toISOString(),
+        status: "failed",
+        progress: 0,
+        failure_reason: "This PDF appears to be scanned images with no extractable text.",
+        chunk_count: 0,
+      },
+    ]);
+
+    renderScreen();
+
+    expect(
+      await screen.findByText("This PDF appears to be scanned images with no extractable text."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/chunks indexed/)).not.toBeInTheDocument();
+  });
+
+  it("surfaces upload rejections, including library-is-full, as error notices with the server's reason text", async () => {
+    mockedList.mockResolvedValue([]);
+    mockedUpload.mockResolvedValue({
+      accepted: [],
+      rejected: [
+        {
+          file_name: "overflow.pdf",
+          reason: "The library is full: delete a document before uploading a new one.",
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await waitFor(() => expect(mockedList).toHaveBeenCalled());
+
+    const input = document.getElementById("document-files") as HTMLInputElement;
+    const file = new File(["content"], "overflow.pdf", { type: "application/pdf" });
+    await user.upload(input, file);
+
+    const notice = await screen.findByText(/overflow\.pdf wasn't uploaded/i);
+    expect(notice).toBeInTheDocument();
+    expect(
+      screen.getByText("The library is full: delete a document before uploading a new one."),
+    ).toBeInTheDocument();
+  });
+
+  it("deletes a document via the real API and removes it from the board", async () => {
+    mockedList.mockResolvedValue([
+      {
+        id: "doc-4",
+        file_name: "policy.docx",
+        size_bytes: 500,
+        uploaded_at: new Date().toISOString(),
+        status: "ready",
+        progress: 100,
+        failure_reason: null,
+        chunk_count: 5,
+      },
+    ]);
+    mockedDelete.mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("policy.docx");
+    await user.click(screen.getByRole("button", { name: /delete policy\.docx/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /delete permanently/i }));
+
+    await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("doc-4"));
+    await waitFor(() => expect(screen.queryByText("policy.docx")).not.toBeInTheDocument());
+  });
+});
