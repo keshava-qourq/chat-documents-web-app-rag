@@ -64,13 +64,32 @@ def fake_object_store(monkeypatch):
 
 
 @pytest.fixture()
-def client(db_sessionmaker, fake_object_store):
+def db_session(db_sessionmaker):
+    """A session on the same in-memory database the `client` fixture serves,
+    for tests that need to set up state (e.g. a failed document) the API
+    itself has no route to create.
+
+    `client` reuses this exact session (rather than opening a second one of
+    its own) for every request it makes during the test. With
+    `expire_on_commit=False`, a second, independent session would keep
+    serving a test's own earlier reads straight out of its identity map even
+    after `client` committed a delete on a different session -- the delete
+    would be real in the database but invisible to the test's assertions
+    against `db_session`. Sharing one session removes that seam: a commit
+    made through `client` is a commit made through this very session, so the
+    next read from it reflects that commit immediately.
+    """
+    session = db_sessionmaker()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture()
+def client(db_session, fake_object_store):
     def override_get_db():
-        session = db_sessionmaker()
-        try:
-            yield session
-        finally:
-            session.close()
+        yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
     try:
@@ -78,15 +97,3 @@ def client(db_sessionmaker, fake_object_store):
             yield test_client
     finally:
         app.dependency_overrides.pop(get_db, None)
-
-
-@pytest.fixture()
-def db_session(db_sessionmaker):
-    """A session on the same in-memory database the `client` fixture serves,
-    for tests that need to set up state (e.g. a failed document) the API
-    itself has no route to create."""
-    session = db_sessionmaker()
-    try:
-        yield session
-    finally:
-        session.close()
