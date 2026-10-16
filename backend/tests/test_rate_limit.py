@@ -125,9 +125,7 @@ def test_chat_requests_succeed_again_after_the_limiter_window_elapses(
     # rolled over.
     limiter.reset()
 
-    after_window = client.post(
-        f"/threads/{thread_id}/messages", json={"question": "after window"}
-    )
+    after_window = client.post(f"/threads/{thread_id}/messages", json={"question": "after window"})
     assert after_window.status_code == 200
     assert len(request_answer_spy) == 2  # "first" and "after window", not "blocked"
 
@@ -164,9 +162,7 @@ def test_chat_limit_is_read_from_rate_limit_chat_per_min_env_var(
     assert client.post(f"/threads/{thread_id}/messages", json={"question": "c"}).status_code == 429
 
 
-def test_upload_limit_is_read_from_rate_limit_uploads_per_hour_env_var(
-    client, monkeypatch
-) -> None:
+def test_upload_limit_is_read_from_rate_limit_uploads_per_hour_env_var(client, monkeypatch) -> None:
     monkeypatch.setenv("RATE_LIMIT_UPLOADS_PER_HOUR", "1")
 
     assert client.post("/documents", files=[_file("one.txt")]).status_code == 200
