@@ -20,7 +20,10 @@ def test_health_reports_ok() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert set(body["services"]) == {"minio"}
+    # Neither service's key is set in the test environment, so both report
+    # unconfigured rather than this test reaching out to either of them.
+    assert set(body["services"]) == {"minio", "gemini"}
+    assert body["services"] == {"minio": False, "gemini": False}
 
 
 def test_the_openapi_document_builds() -> None:
@@ -29,4 +32,9 @@ def test_the_openapi_document_builds() -> None:
     response = client.get("/openapi.json")
 
     assert response.status_code == 200
-    assert "/health" in response.json()["paths"]
+    paths = response.json()["paths"]
+    assert "/health" in paths
+    assert "/documents" in paths
+    assert "/documents/{document_id}/status" in paths
+    assert "/threads" in paths
+    assert "/threads/{thread_id}/messages" in paths
