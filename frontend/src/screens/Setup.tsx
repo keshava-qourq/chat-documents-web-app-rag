@@ -22,7 +22,8 @@ const ENV_VARS = [
     defaultText: "none — required",
     description:
       "Used for both embeddings and grounded chat generation. Read only on the server, at the moment it is needed. No endpoint in this app returns it, and this screen never renders it — not even masked.",
-    where: "Create a key at aistudio.google.com/apikey and set it in your .env or host environment.",
+    where:
+      "Create a key at aistudio.google.com/apikey and set it in your .env or host environment.",
   },
   {
     env: "DATABASE_URL",
@@ -30,14 +31,17 @@ const ENV_VARS = [
     defaultText: "none — required",
     description:
       "Postgres connection string for the database holding documents, chunks, threads, messages and citations, with the pgvector extension enabled.",
-    where: "docker-compose.yml starts a local Postgres 16 instance that matches the value in .env.example.",
+    where:
+      "docker-compose.yml starts a local Postgres 16 instance that matches the value in .env.example.",
   },
   {
     env: "MINIO_ENDPOINT",
     required: true,
     defaultText: "none — required",
-    description: "Host:port of the S3-compatible MinIO instance original uploaded files are stored in.",
-    where: "docker-compose.yml starts a local MinIO instance that matches the value in .env.example.",
+    description:
+      "Host:port of the S3-compatible MinIO instance original uploaded files are stored in.",
+    where:
+      "docker-compose.yml starts a local MinIO instance that matches the value in .env.example.",
   },
   {
     env: "MINIO_ACCESS_KEY",
@@ -240,9 +244,9 @@ export default function Screen() {
             style={{ color: brand.neutralColor }}
           >
             Static reference documentation for this install, not a live status page. This screen
-            calls no API and polls nothing, so nothing below is a reading of the running
-            deployment — it describes what the delivered backend reads from its own environment
-            and how to run it.
+            calls no API and polls nothing, so nothing below is a reading of the running deployment
+            — it describes what the delivered backend reads from its own environment and how to run
+            it.
           </p>
         </header>
 
@@ -316,12 +320,16 @@ export default function Screen() {
               borderRadius: brand.radius,
             }}
           >
-            <Icons.X className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" style={{ color: brand.primaryColor }} />
+            <Icons.X
+              className="w-4 h-4 shrink-0 mt-0.5"
+              aria-hidden="true"
+              style={{ color: brand.primaryColor }}
+            />
             <span>
               <strong className="font-semibold">GEMINI_API_KEY is never shown here.</strong> It is
-              read server-side only, and no endpoint in this app returns it — so this screen has
-              no value to display, masked or otherwise. Whoever holds the server or host
-              environment can confirm it is set.
+              read server-side only, and no endpoint in this app returns it — so this screen has no
+              value to display, masked or otherwise. Whoever holds the server or host environment
+              can confirm it is set.
             </span>
           </div>
         </section>
@@ -528,9 +536,9 @@ export default function Screen() {
         {/* Footer */}
         <footer className="mt-10 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-[13px] leading-relaxed max-w-md" style={{ color: brand.neutralColor }}>
-            No plans, no paywall and no usage billing anywhere in this app. Gemini usage for
-            answers and embeddings is charged to the operator&apos;s own Google account — this app
-            bills no one.
+            No plans, no paywall and no usage billing anywhere in this app. Gemini usage for answers
+            and embeddings is charged to the operator&apos;s own Google account — this app bills no
+            one.
           </p>
           <div className="flex flex-wrap gap-2">
             <button

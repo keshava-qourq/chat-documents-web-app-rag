@@ -92,8 +92,9 @@ describe("Setup screen — static operator documentation (AC-065..070)", () => {
     expect(
       screen.queryByRole("button", { name: /upgrade|subscribe|buy|purchase|pay/i }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /upgrade|subscribe|buy|purchase|pay/i })).not
-      .toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /upgrade|subscribe|buy|purchase|pay/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("states Gemini usage bills the operator's own Google account and the app bills no one (AC-070)", () => {
