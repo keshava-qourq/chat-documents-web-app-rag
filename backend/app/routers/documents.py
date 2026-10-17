@@ -3,20 +3,35 @@
 Every route here is reachable with no authentication of any kind -- there is
 one shared workspace, so there is no owner column and no per-caller
 filtering anywhere in this module. Originals are stored in MinIO through
-`app.storage`; text extraction, chunking and embedding are a later story, so
-`status` stays "processing" for every newly accepted document.
+`app.storage`. Once a document's row is committed, this module schedules
+`app.ingestion.ingest_document` as a FastAPI background task on the same
+request-scoped session -- the api component "schedules background indexing"
+per the approved architecture -- so every accepted document is actually
+carried from "processing" to "ready" or "failed" rather than being left in
+"processing" forever.
 """
 
 import mimetypes
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app import storage
 from app.config import MAX_UPLOAD_FILE_BYTES, document_cap, rate_limit_uploads_per_hour
 from app.database import get_db
+from app.ingestion import ingest_document
 from app.models import Document
 from app.rate_limit import limiter
 from app.schemas import (
@@ -48,6 +63,7 @@ def _cap_full_reason() -> str:
 @limiter.limit(lambda: f"{rate_limit_uploads_per_hour()}/hour")
 async def upload_documents(
     request: Request,
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> UploadResponse:
@@ -104,6 +120,15 @@ async def upload_documents(
         db.add(document)
         db.commit()
         db.refresh(document)
+
+        # Scheduled, not called directly: this handler only ever hands the
+        # indexer a document id and the same request-scoped session it has
+        # been using all along, exactly the contract `ingest_document`
+        # promises -- it runs once the response has been sent, so the
+        # caller gets its "processing" status back immediately and the
+        # document is carried on to "ready" or "failed" without the caller
+        # ever invoking the indexer itself.
+        background_tasks.add_task(ingest_document, document.id, db)
 
         accepted.append(DocumentAccepted.model_validate(document))
         await upload.close()
