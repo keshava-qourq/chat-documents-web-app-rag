@@ -100,9 +100,19 @@ export default function App() {
         </div>
       )}
 
-      {/* Desktop sidebar: chat, documents and setup all reachable, alongside whichever is open. */}
+      {/*
+        Desktop sidebar: chat, documents and setup all reachable, alongside
+        whichever is open. Hidden from the accessibility tree (not just
+        visually, via the "hidden lg:block" pair above) whenever the mobile
+        drawer is open: below the lg breakpoint that is the only time both
+        this nav and the drawer's own copy exist in the DOM together, and an
+        assistive-tech query for "the" nav (by its shared "Main navigation"
+        label) must resolve to the one the person can actually see, not
+        both.
+      */}
       <aside
         className="hidden w-56 shrink-0 border-r p-4 lg:block"
+        aria-hidden={navOpen ? "true" : undefined}
         style={{ backgroundColor: "var(--brand-surface)", borderColor: "var(--brand-border)" }}
       >
         <p

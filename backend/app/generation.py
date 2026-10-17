@@ -36,7 +36,7 @@ from app.retrieval import RetrievedContext
 GENERATION_MODEL = "gemini-1.5-flash"
 
 NO_DOCUMENTS_MESSAGE = (
-    "There are no indexed documents yet. Upload a document on the Documents "
+    "There are no documents indexed yet. Upload a document on the Documents "
     "screen to start asking questions."
 )
 NOT_FOUND_PHRASE = "not found in the uploaded documents"

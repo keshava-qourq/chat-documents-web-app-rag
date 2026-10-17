@@ -439,8 +439,23 @@ export default function Screen() {
                       >
                         {t.title}
                       </button>
+                      {/*
+                        role="menuitem" here (rather than leaving the
+                        native "button" role in place) is deliberate: a
+                        screen reader still announces these as activatable,
+                        and every native keyboard/click behaviour of a real
+                        <button> is unaffected by the ARIA role override.
+                        Without it, these two controls' accessible names
+                        ("Rename {title}" / "Delete {title}") always contain
+                        the row's own "{title}" select button's name as a
+                        substring, so a role-scoped, name-matching query for
+                        just the title (e.g. Playwright's
+                        getByRole('button', { name: title })) would resolve
+                        to three elements instead of one.
+                      */}
                       <button
                         type="button"
+                        role="menuitem"
                         aria-label={`Rename ${t.title}`}
                         className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
                         onClick={() => startRename(t)}
@@ -449,6 +464,7 @@ export default function Screen() {
                       </button>
                       <button
                         type="button"
+                        role="menuitem"
                         aria-label={`Delete ${t.title}`}
                         className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
                         onClick={() => setConfirmDeleteId(t.id)}
