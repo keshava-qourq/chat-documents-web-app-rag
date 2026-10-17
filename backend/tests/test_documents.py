@@ -44,14 +44,17 @@ def test_upload_accepts_all_four_supported_formats_and_they_appear_in_list(clien
     assert len(body["accepted"]) == 4
     accepted_names = {item["file_name"] for item in body["accepted"]}
     assert accepted_names == {"report.pdf", "notes.docx", "readme.txt", "summary.md"}
+    # The response is built, and reports "processing", before the request's
+    # own background indexing task for each document has had a chance to
+    # run -- this is about every one of the four formats being *accepted*,
+    # not about how indexing of their (here fake) bytes later turns out.
     for item in body["accepted"]:
         assert item["status"] == "processing"
 
     listed = client.get("/documents").json()
     listed_names = {item["file_name"] for item in listed}
     assert listed_names == accepted_names
-    for item in listed:
-        assert item["status"] == "processing"
+    assert {item["status"] for item in listed} <= {"processing", "ready", "failed"}
 
 
 # --- AC-002: unsupported formats are rejected and persist nothing ------------

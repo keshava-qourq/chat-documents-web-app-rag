@@ -46,10 +46,41 @@ def db_sessionmaker(db_engine):
     return sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
 
 
+class _FakeStreamingBody:
+    """Stands in for the boto3 `StreamingBody` on a `get_object` response --
+    `app.ingestion._read_original` only ever calls `.read()` on it."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+
+class _FakeS3Client:
+    """Stands in for the boto3 S3 client `storage.get_client()` would hand
+    back, reading from the same in-memory dict `put_object`/`delete_object`
+    write to below -- so a document actually indexed in a test reads back
+    the bytes it was uploaded with, instead of `ingest_document` reaching
+    for a real (and here unreachable) MinIO endpoint."""
+
+    def __init__(self, stored: dict[str, tuple[bytes, str]]) -> None:
+        self._stored = stored
+
+    def get_object(self, Bucket: str, Key: str):  # noqa: N803 -- matches boto3's signature
+        if Key not in self._stored:
+            raise KeyError(f"No such key: {Key}")
+        data, _content_type = self._stored[Key]
+        return {"Body": _FakeStreamingBody(data)}
+
+
 @pytest.fixture()
 def fake_object_store(monkeypatch):
-    """Replaces the boto3-backed put/delete with an in-memory dict so no
-    MinIO connection is ever attempted."""
+    """Replaces the boto3-backed put/delete/get with an in-memory dict so no
+    MinIO connection is ever attempted -- including by the background
+    indexing task, which reads an uploaded document's original bytes back
+    through `storage.get_client().get_object(...)` rather than through
+    `put_object`/`delete_object`."""
     stored: dict[str, tuple[bytes, str]] = {}
 
     def fake_put_object(key: str, data: bytes, content_type: str) -> None:
@@ -58,8 +89,12 @@ def fake_object_store(monkeypatch):
     def fake_delete_object(key: str) -> None:
         stored.pop(key, None)
 
+    def fake_get_client():
+        return _FakeS3Client(stored)
+
     monkeypatch.setattr(storage, "put_object", fake_put_object)
     monkeypatch.setattr(storage, "delete_object", fake_delete_object)
+    monkeypatch.setattr(storage, "get_client", fake_get_client)
     return stored
 
 
