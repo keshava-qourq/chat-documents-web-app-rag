@@ -20,12 +20,20 @@ a live Gemini call -- so this proves the scheduling handoff, not Gemini's
 own behaviour (already covered by `test_ingestion.py` and
 `test_gemini_config_error.py`).
 
+`app.ingestion` imports `embed_texts` by name (`from app.embeddings import
+... embed_texts`), so it resolves the call against its own module's
+attribute at call time, not `app.embeddings`'s. The stand-in is therefore
+patched onto `app.ingestion.embed_texts` -- patching `app.embeddings
+.embed_texts` instead leaves `app.ingestion`'s own reference untouched and a
+real (and here unreachable) Gemini call is attempted, which is exactly what
+left this test failing before.
+
 Uses the shared `client` and `fake_object_store` fixtures from
 `conftest.py`: an in-memory SQLite database and a fake object store standing
 in for MinIO, so this suite never touches a live database server or MinIO.
 """
 
-from app import embeddings
+from app import ingestion
 
 TXT_BYTES = b"Employees are entitled to twenty five days of annual leave each year."
 
@@ -34,7 +42,7 @@ def test_accepted_upload_is_indexed_without_the_caller_ever_invoking_the_indexer
     client, fake_object_store, monkeypatch
 ) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(embeddings, "embed_texts", lambda texts: [[0.1, 0.2] for _ in texts])
+    monkeypatch.setattr(ingestion, "embed_texts", lambda texts: [[0.1, 0.2] for _ in texts])
 
     response = client.post(
         "/documents", files=[("files", ("handbook.txt", TXT_BYTES, "text/plain"))]
