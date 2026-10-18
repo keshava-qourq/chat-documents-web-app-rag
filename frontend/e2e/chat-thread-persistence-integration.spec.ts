@@ -44,7 +44,14 @@ test.describe("Asking a question in the UI persists the thread the real API repo
     // ready documents anywhere in the shared library, the backend's canned
     // reply surfaces as this banner rather than a generated answer.
     await expect(page.getByText(/no documents indexed yet/i)).toBeVisible();
-    await expect(page.getByText(question)).toBeVisible();
+    // Scoped to the rendered message bubble (the only element with this
+    // markup wrapping message text) rather than a bare `getByText`: the
+    // thread the question creates is also persisted with this same text as
+    // its auto-derived title (confirmed below via the API), so once the
+    // sidebar refreshes it shows the identical text again as a button --
+    // an unscoped locator would then match both and fail Playwright's
+    // strict mode.
+    await expect(page.locator("div.prose", { hasText: question })).toBeVisible();
 
     // Confirm the result through the real API, not through anything this
     // test told a mock to say: find the thread the UI must have created, by
