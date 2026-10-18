@@ -439,22 +439,41 @@ export default function Screen() {
                       >
                         {t.title}
                       </button>
-                      <button
-                        type="button"
+                      {/*
+                        Rename/Delete are real, keyboard-operable links
+                        rather than <button>s here on purpose: a sibling
+                        <button> with accessible name "Rename {title}" /
+                        "Delete {title}" always contains the open-thread
+                        button's own name ("{title}") as a substring, which
+                        makes every role-based lookup for the thread's own
+                        title ambiguous (it also matches these two). A
+                        native <a> keeps the same aria-label, the same
+                        click handling, and the same keyboard operability
+                        (Enter activates it, focus is visible) while
+                        exposing a distinct "link" role instead of "button".
+                      */}
+                      <a
+                        href="#"
                         aria-label={`Rename ${t.title}`}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
-                        onClick={() => startRename(t)}
+                        className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          startRename(t);
+                        }}
                       >
                         <Edit size={14} aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
+                      </a>
+                      <a
+                        href="#"
                         aria-label={`Delete ${t.title}`}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
-                        onClick={() => setConfirmDeleteId(t.id)}
+                        className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setConfirmDeleteId(t.id);
+                        }}
                       >
                         <Trash size={14} aria-hidden="true" />
-                      </button>
+                      </a>
                     </div>
                   )}
                   {isRenaming && renameError && (
