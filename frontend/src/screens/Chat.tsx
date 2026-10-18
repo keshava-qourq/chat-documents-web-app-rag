@@ -119,16 +119,6 @@ export default function Screen() {
   const [renameValue, setRenameValue] = React.useState("");
   const [renameError, setRenameError] = React.useState<string | null>(null);
   const [renameSaving, setRenameSaving] = React.useState(false);
-  // A validation/outcome message shown against a thread row *after* the
-  // inline rename form has already closed -- distinct from `renameError`,
-  // which is shown *while the form is still open* (e.g. a failed PATCH the
-  // user might retry without re-opening the form). An empty title is
-  // rejected client-side and the form closes immediately back to the
-  // read-only row, with this note left behind so the rejection is still
-  // readable (AC-052) rather than silently reverting.
-  const [renameNotice, setRenameNotice] = React.useState<{ id: string; message: string } | null>(
-    null,
-  );
 
   const [confirmDeleteId, setConfirmDeleteId] = React.useState<string | null>(null);
   const [deleting, setDeleting] = React.useState(false);
@@ -179,7 +169,6 @@ export default function Screen() {
 
   const openThread = (id: string) => {
     setRenamingId(null);
-    setRenameNotice(null);
     setSendError(null);
     setNoDocumentsIndexed(false);
     setSearchParams({ thread: id });
@@ -187,7 +176,6 @@ export default function Screen() {
 
   const newConversation = () => {
     setRenamingId(null);
-    setRenameNotice(null);
     setLoadError(null);
     setSendError(null);
     setNoDocumentsIndexed(false);
@@ -231,8 +219,14 @@ export default function Screen() {
     }));
     setComposer("");
 
+    // Declared outside the try block (and outside its block scope) on
+    // purpose: the "no documents indexed yet" path below still needs to
+    // know which thread was created, so it can tell the sidebar about it,
+    // even though it is reported as a thrown error rather than a normal
+    // return.
+    let threadId: string | null = activeId;
+
     try {
-      let threadId = activeId;
       if (!threadId) {
         const created = await createThread();
         threadId = created.id;
@@ -273,6 +267,14 @@ export default function Screen() {
             : prev,
         );
         setNoDocumentsIndexed(true);
+        // The thread itself (and the user's question) was still created
+        // and persisted server-side even though no answer came back --
+        // only the answer was never grounded enough to save. Refresh the
+        // sidebar so that thread (readable from a fresh GET /threads) also
+        // shows up here, not only via the API.
+        if (threadId) {
+          await fetchThreads();
+        }
       } else {
         // Covers both a rejected send and a connection dropped mid-stream:
         // discard the optimistic turn, restore the question into the
@@ -300,30 +302,26 @@ export default function Screen() {
     setRenamingId(thread.id);
     setRenameValue(thread.title);
     setRenameError(null);
-    setRenameNotice(null);
   };
 
   const cancelRename = () => {
     setRenamingId(null);
     setRenameValue("");
     setRenameError(null);
-    setRenameNotice(null);
   };
 
   const saveRename = async (id: string) => {
     const trimmed = renameValue.trim();
     if (!trimmed) {
-      // Rejected client-side, with no call to the API: close the form back
-      // to the read-only row immediately, leaving a note against it so the
-      // rejection is still visible rather than only flashing while the
-      // form was open (AC-052).
-      setRenamingId(null);
-      setRenameValue("");
-      setRenameError(null);
-      setRenameNotice({ id, message: "Title can't be empty." });
+      // Rejected client-side, with no call to the API: the inline form
+      // stays open (so the typo can be fixed in place) and the error is
+      // shown right there, rather than reverting to the read-only row --
+      // the previous title must not reappear as if nothing happened
+      // (AC-052).
+      setRenameError("Title can't be empty.");
       return;
     }
-    setRenameNotice(null);
+    setRenameError(null);
     setRenameSaving(true);
     try {
       const result = await renameThread(id, trimmed);
@@ -500,9 +498,6 @@ export default function Screen() {
                   )}
                   {isRenaming && renameError && (
                     <p className="px-2 pb-1 text-xs text-red-600">{renameError}</p>
-                  )}
-                  {!isRenaming && renameNotice?.id === t.id && (
-                    <p className="px-2 pb-1 text-xs text-red-600">{renameNotice.message}</p>
                   )}
                 </li>
               );
