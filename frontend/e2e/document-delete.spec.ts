@@ -25,6 +25,16 @@ async function mockDocumentsApi(
   },
 ) {
   await page.route("**/documents", async (route) => {
+    // The SPA's own route for this screen is also "/documents" -- a glob
+    // like "**/documents" matches by URL suffix only, so without this
+    // guard it would also intercept the page's own navigation request
+    // (resourceType "document") and fulfil it with this JSON body instead
+    // of letting the real app shell load, leaving every later locator in
+    // this file waiting on a page that never mounted.
+    if (route.request().resourceType() === "document") {
+      await route.continue();
+      return;
+    }
     if (route.request().method() !== "GET") {
       await route.continue();
       return;
@@ -85,7 +95,12 @@ test.describe("AC-015..018: permanent document deletion", () => {
     await dialog.getByRole("button", { name: /delete permanently/i }).click();
 
     await expect(page.getByRole("dialog")).toBeHidden();
-    await expect(page.getByText(DOCUMENT.file_name)).toHaveCount(0);
+    // The document's own row title is an <h3> (role "heading"); a plain
+    // text search for the file name also matches the success notice this
+    // same deletion legitimately raises ("handbook.pdf deleted for
+    // everyone"), so it never reaches a count of 0 even once the row is
+    // gone. The heading is what actually identifies the row.
+    await expect(page.getByRole("heading", { name: DOCUMENT.file_name })).toHaveCount(0);
     expect(deleteState.deleteCalls).toBe(1);
   });
 

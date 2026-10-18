@@ -298,15 +298,11 @@ export default function Screen() {
       await deleteDocument(doc.id);
       setDocs((prev) => prev.filter((d) => d.id !== doc.id));
       setConfirmDoc(null);
-      pushNotice({
-        tone: "info",
-        title: doc.file_name + " deleted for everyone",
-        detail:
-          doc.status === "processing"
-            ? "Indexing was stopped. Nothing was left behind in the search index."
-            : (doc.chunk_count || 0) +
-              " chunks and their embeddings were removed from the search index. Chat answers will stop citing it.",
-      });
+      // No success toast here: unlike a rejection or an upload confirmation
+      // (both of which need the file's own name to be legible), a toast
+      // naming the just-deleted file would put that exact name right back
+      // on screen a moment after the user asked for every trace of it to be
+      // gone -- the removed row itself is the confirmation.
     } catch (e) {
       pushNotice({
         tone: "error",
