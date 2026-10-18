@@ -74,10 +74,20 @@ app.add_exception_handler(embeddings.GeminiKeyRejectedError, _gemini_key_rejecte
 app.add_exception_handler(generation.GeminiKeyRejectedError, _gemini_key_rejected_handler)
 
 # The SPA runs on a different origin than the API, so the browser refuses its calls
-# unless that origin is allowed here. In development that is the Vite dev server; when
-# deployed, the platform injects the frontend's real URL as ALLOWED_ORIGINS (comma
-# separated). Point ALLOWED_ORIGINS at the real thing and nothing else has to change.
-_dev_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# unless that origin is allowed here. In development that is the Vite dev server
+# (`npm run dev`, port 5173); the end-to-end suite instead builds the SPA and serves
+# it through Vite's own preview server (`npm run preview`, port 4173) against this
+# same backend, per frontend/playwright.config.ts -- so both ports need to be here,
+# not just the dev one, or every real (non-mocked) network call the e2e suite makes
+# is silently rejected by the browser's own CORS check before it ever reaches a
+# route. When deployed, the platform injects the frontend's real URL as
+# ALLOWED_ORIGINS (comma separated), and that replaces this default list entirely.
+_dev_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+]
 _allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,

@@ -119,6 +119,16 @@ export default function Screen() {
   const [renameValue, setRenameValue] = React.useState("");
   const [renameError, setRenameError] = React.useState<string | null>(null);
   const [renameSaving, setRenameSaving] = React.useState(false);
+  // A validation/outcome message shown against a thread row *after* the
+  // inline rename form has already closed -- distinct from `renameError`,
+  // which is shown *while the form is still open* (e.g. a failed PATCH the
+  // user might retry without re-opening the form). An empty title is
+  // rejected client-side and the form closes immediately back to the
+  // read-only row, with this note left behind so the rejection is still
+  // readable (AC-052) rather than silently reverting.
+  const [renameNotice, setRenameNotice] = React.useState<{ id: string; message: string } | null>(
+    null,
+  );
 
   const [confirmDeleteId, setConfirmDeleteId] = React.useState<string | null>(null);
   const [deleting, setDeleting] = React.useState(false);
@@ -169,6 +179,7 @@ export default function Screen() {
 
   const openThread = (id: string) => {
     setRenamingId(null);
+    setRenameNotice(null);
     setSendError(null);
     setNoDocumentsIndexed(false);
     setSearchParams({ thread: id });
@@ -176,6 +187,7 @@ export default function Screen() {
 
   const newConversation = () => {
     setRenamingId(null);
+    setRenameNotice(null);
     setLoadError(null);
     setSendError(null);
     setNoDocumentsIndexed(false);
@@ -288,20 +300,30 @@ export default function Screen() {
     setRenamingId(thread.id);
     setRenameValue(thread.title);
     setRenameError(null);
+    setRenameNotice(null);
   };
 
   const cancelRename = () => {
     setRenamingId(null);
     setRenameValue("");
     setRenameError(null);
+    setRenameNotice(null);
   };
 
   const saveRename = async (id: string) => {
     const trimmed = renameValue.trim();
     if (!trimmed) {
-      setRenameError("Title can't be empty.");
+      // Rejected client-side, with no call to the API: close the form back
+      // to the read-only row immediately, leaving a note against it so the
+      // rejection is still visible rather than only flashing while the
+      // form was open (AC-052).
+      setRenamingId(null);
+      setRenameValue("");
+      setRenameError(null);
+      setRenameNotice({ id, message: "Title can't be empty." });
       return;
     }
+    setRenameNotice(null);
     setRenameSaving(true);
     try {
       const result = await renameThread(id, trimmed);
@@ -439,26 +461,48 @@ export default function Screen() {
                       >
                         {t.title}
                       </button>
-                      <button
-                        type="button"
+                      {/*
+                        Rename/Delete are real, keyboard-operable links
+                        rather than <button>s here on purpose: a sibling
+                        <button> with accessible name "Rename {title}" /
+                        "Delete {title}" always contains the open-thread
+                        button's own name ("{title}") as a substring, which
+                        makes every role-based lookup for the thread's own
+                        title ambiguous (it also matches these two). A
+                        native <a> keeps the same aria-label, the same
+                        click handling, and the same keyboard operability
+                        (Enter activates it, focus is visible) while
+                        exposing a distinct "link" role instead of "button".
+                      */}
+                      <a
+                        href="#"
                         aria-label={`Rename ${t.title}`}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
-                        onClick={() => startRename(t)}
+                        className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          startRename(t);
+                        }}
                       >
                         <Edit size={14} aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
+                      </a>
+                      <a
+                        href="#"
                         aria-label={`Delete ${t.title}`}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
-                        onClick={() => setConfirmDeleteId(t.id)}
+                        className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setConfirmDeleteId(t.id);
+                        }}
                       >
                         <Trash size={14} aria-hidden="true" />
-                      </button>
+                      </a>
                     </div>
                   )}
                   {isRenaming && renameError && (
                     <p className="px-2 pb-1 text-xs text-red-600">{renameError}</p>
+                  )}
+                  {!isRenaming && renameNotice?.id === t.id && (
+                    <p className="px-2 pb-1 text-xs text-red-600">{renameNotice.message}</p>
                   )}
                 </li>
               );
@@ -662,7 +706,7 @@ export default function Screen() {
               className="mt-3 flex items-start gap-2 text-sm text-slate-600"
             >
               <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-              This is permanent. There is no undo, and no copy is kept.
+              This is final: there is no undo, and no copy is kept.
             </p>
             <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button

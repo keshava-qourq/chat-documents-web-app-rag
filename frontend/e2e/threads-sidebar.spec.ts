@@ -149,7 +149,14 @@ test.describe("AC-045: opening an existing thread", () => {
     await expect(
       page.getByText("The Berlin office is closed from 24 December through 2 January."),
     ).toBeVisible();
-    await expect(page.getByText("handbook.pdf")).toBeVisible();
+
+    // The citation always shows its document name/location as the toggle
+    // label (AC-029/AC-030); the excerpt itself only renders once that
+    // toggle is expanded (AC-032) -- it has to be clicked before the
+    // excerpt text can be found at all.
+    const citationToggle = page.getByRole("button", { name: /handbook\.pdf/ });
+    await expect(citationToggle).toBeVisible();
+    await citationToggle.click();
     await expect(page.getByText(/Berlin office closes for the Christmas holidays/)).toBeVisible();
   });
 });
@@ -180,7 +187,13 @@ test.describe("AC-051 / AC-052: renaming a conversation", () => {
     await page.getByLabel("Save title").click();
 
     await expect(page.getByText(/title can't be empty/i)).toBeVisible();
-    // The rejected rename never reached the sidebar, and the previous title stands.
+    // An empty submission is rejected client-side, before it ever reaches
+    // the server (renameCalls stays at 1): the edit intentionally stays
+    // open so the typo can be fixed in place, so the previous title isn't
+    // rendered as a button again until the edit itself is cancelled --
+    // that's the moment to confirm the rejected rename never overwrote it.
+    expect(state.renameCalls).toBe(1);
+    await page.getByLabel("Cancel rename").click();
     await expect(page.getByRole("button", { name: "Holiday closures policy" })).toBeVisible();
   });
 });
@@ -201,7 +214,10 @@ test.describe("AC-053: deleting a conversation", () => {
     await page.getByLabel("Delete Berlin office holidays").click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText(/permanent/i)).toBeVisible();
+    // "permanent" alone also matches the "Delete permanently" button's own
+    // name (it contains "permanent" as a substring), which makes that
+    // locator ambiguous; "no undo" appears only in the warning paragraph.
+    await expect(dialog.getByText(/no undo/i)).toBeVisible();
     await dialog.getByRole("button", { name: /delete permanently/i }).click();
 
     await expect(page.getByRole("dialog")).toBeHidden();
