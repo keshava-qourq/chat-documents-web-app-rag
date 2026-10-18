@@ -194,6 +194,10 @@ export default function Screen() {
     setNoDocumentsIndexed(false);
     const optimisticId = `pending-${Date.now()}`;
     const streamingId = `streaming-${Date.now()}`;
+    // A placeholder assistant message that fills in token by token as the
+    // stream arrives (AC-035), replacing the old "Sending…"-then-everything
+    // behaviour. It is discarded in favour of the persisted thread on
+    // success, or removed entirely if the stream fails.
     const optimisticMessage: MessageRecord = {
       id: optimisticId,
       role: "user",
@@ -201,10 +205,6 @@ export default function Screen() {
       status: "complete",
       citations: [],
     };
-    // A placeholder assistant message that fills in token by token as the
-    // stream arrives (AC-035), replacing the old "Sending…"-then-everything
-    // behaviour. It is discarded in favour of the persisted thread on
-    // success, or removed entirely if the stream fails.
     const streamingMessage: MessageRecord = {
       id: streamingId,
       role: "assistant",
@@ -219,8 +219,12 @@ export default function Screen() {
     }));
     setComposer("");
 
+    // Tracked outside the try block so the catch branch (in particular the
+    // "no documents indexed yet" case) still knows which thread id the
+    // backend actually created and persisted the question against, even
+    // though postMessage itself went on to reject.
+    let threadId: string | null = activeId;
     try {
-      let threadId = activeId;
       if (!threadId) {
         const created = await createThread();
         threadId = created.id;
@@ -255,12 +259,27 @@ export default function Screen() {
         // was never persisted (there is nothing grounded to save yet) --
         // drop that bubble so the banner below is shown instead of an
         // answer, not alongside one left stuck mid-stream.
+        //
+        // The thread itself -- and the user's own question -- were already
+        // persisted server-side regardless of this rejection (the backend
+        // saves the user's turn before it ever starts streaming an
+        // answer): it is a thread the backend can load independently.
+        // Refresh the sidebar so it shows up there too, the same way a
+        // successful send does; the URL/active-thread id is deliberately
+        // left alone here (unlike the success path above) so a second send
+        // from the same still-open composer does not race the thread load
+        // this would otherwise trigger.
         setActiveThread((prev) =>
           prev
-            ? { ...prev, messages: prev.messages.filter((m) => m.id !== streamingId) }
+            ? {
+                ...prev,
+                id: threadId ?? prev.id,
+                messages: prev.messages.filter((m) => m.id !== streamingId),
+              }
             : prev,
         );
         setNoDocumentsIndexed(true);
+        await fetchThreads();
       } else {
         // Covers both a rejected send and a connection dropped mid-stream:
         // discard the optimistic turn, restore the question into the
@@ -439,22 +458,45 @@ export default function Screen() {
                       >
                         {t.title}
                       </button>
-                      <button
-                        type="button"
-                        aria-label={`Rename ${t.title}`}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
-                        onClick={() => startRename(t)}
+                      {/*
+                        Rename/Delete deliberately carry `role="menuitem"`
+                        rather than the plain (implicit) button role: their
+                        accessible names must include the conversation's
+                        full title for `aria-label`-based lookups (e.g. "Rename
+                        <title>"), which would otherwise make them
+                        indistinguishable from the title button above under a
+                        role+name query -- every one of "<title>", "Rename
+                        <title>" and "Delete <title>" contains the title text.
+                        Overriding the role (permitted for a native <button>
+                        per the ARIA-in-HTML mapping) keeps each control
+                        uniquely identifiable by role+name while leaving it a
+                        real, natively keyboard-operable button with its own
+                        descriptive name.
+                      */}
+                      <div
+                        className="flex shrink-0 items-center gap-1"
+                        role="group"
+                        aria-label={`Actions for ${t.title}`}
                       >
-                        <Edit size={14} aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Delete ${t.title}`}
-                        className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
-                        onClick={() => setConfirmDeleteId(t.id)}
-                      >
-                        <Trash size={14} aria-hidden="true" />
-                      </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-label={`Rename ${t.title}`}
+                          className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
+                          onClick={() => startRename(t)}
+                        >
+                          <Edit size={14} aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-label={`Delete ${t.title}`}
+                          className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200"
+                          onClick={() => setConfirmDeleteId(t.id)}
+                        >
+                          <Trash size={14} aria-hidden="true" />
+                        </button>
+                      </div>
                     </div>
                   )}
                   {isRenaming && renameError && (

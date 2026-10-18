@@ -100,19 +100,35 @@ export default function App() {
         </div>
       )}
 
-      {/* Desktop sidebar: chat, documents and setup all reachable, alongside whichever is open. */}
-      <aside
-        className="hidden w-56 shrink-0 border-r p-4 lg:block"
-        style={{ backgroundColor: "var(--brand-surface)", borderColor: "var(--brand-border)" }}
-      >
-        <p
-          className="mb-4 px-3 text-sm font-semibold"
-          style={{ fontFamily: "var(--brand-font-heading)" }}
+      {/*
+        Desktop sidebar: chat, documents and setup all reachable, alongside
+        whichever is open. Its CSS (`hidden lg:block`) is what keeps it out
+        of the way below the `lg` breakpoint, but a `<nav aria-label="Main
+        navigation">` living here *and* in the mobile drawer above, present
+        in the DOM at the same time, is ambiguous to anything that looks a
+        screen up by that name -- not just a human on a narrow viewport, who
+        would never see both at once, but any tooling that queries by role
+        and accessible name without also caring about which one the browser
+        currently renders. The drawer can only ever be opened through the
+        mobile-only toggle above, so while it is open this is never the
+        sidebar a desktop visitor is using -- there is nothing lost by
+        leaving it out of the tree for that moment, and no duplicate left
+        for anything to find.
+      */}
+      {!navOpen && (
+        <aside
+          className="hidden w-56 shrink-0 border-r p-4 lg:block"
+          style={{ backgroundColor: "var(--brand-surface)", borderColor: "var(--brand-border)" }}
         >
-          {brandTitle}
-        </p>
-        {navLinks}
-      </aside>
+          <p
+            className="mb-4 px-3 text-sm font-semibold"
+            style={{ fontFamily: "var(--brand-font-heading)" }}
+          >
+            {brandTitle}
+          </p>
+          {navLinks}
+        </aside>
+      )}
 
       <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {visited.has("/chat") && (
