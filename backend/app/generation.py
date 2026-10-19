@@ -33,7 +33,7 @@ from google import genai
 from app.config import embedding_max_retries, gemini_api_key
 from app.retrieval import RetrievedContext
 
-GENERATION_MODEL = "gemini-1.5-flash"
+GENERATION_MODEL = "gemini-2.5-flash"
 
 NO_DOCUMENTS_MESSAGE = (
     "There are no documents indexed yet. Upload a document on the Documents "

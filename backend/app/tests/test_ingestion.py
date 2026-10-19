@@ -144,7 +144,7 @@ def test_embed_texts_retries_then_succeeds(monkeypatch) -> None:
             self.embeddings = [FakeEmbedding(v) for v in vectors]
 
     class FakeModels:
-        def embed_content(self, model, contents):
+        def embed_content(self, model, contents, config=None):
             calls["count"] += 1
             if calls["count"] < 3:
                 raise RuntimeError("transient failure")
@@ -167,7 +167,7 @@ def test_embed_texts_raises_service_error_after_exhausting_retries(monkeypatch) 
     monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
 
     class FakeModels:
-        def embed_content(self, model, contents):
+        def embed_content(self, model, contents, config=None):
             raise RuntimeError("always fails")
 
     class FakeClient:

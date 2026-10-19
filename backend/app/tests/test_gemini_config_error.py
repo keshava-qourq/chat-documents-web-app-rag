@@ -87,7 +87,7 @@ class _RejectingModels:
         error.status_code = self.status_code
         raise error
 
-    def embed_content(self, model, contents):
+    def embed_content(self, model, contents, config=None):
         self._raise()
 
     def generate_content(self, model, contents):

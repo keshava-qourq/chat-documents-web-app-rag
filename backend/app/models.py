@@ -15,8 +15,8 @@ from sqlalchemy.types import JSON, DateTime, TypeDecorator
 
 from app.database import Base
 
-# Gemini's text-embedding-004, the model this project calls for embeddings,
-# returns 768-dimensional vectors; chunks.embedding is sized to match.
+# Gemini's gemini-embedding-001, the model this project calls for embeddings,
+# is asked for 768-dimensional vectors; chunks.embedding is sized to match.
 EMBEDDING_DIM = 768
 
 

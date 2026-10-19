@@ -19,10 +19,12 @@ code.
 """
 
 from google import genai
+from google.genai import types
 
 from app.config import embedding_max_retries, gemini_api_key
+from app.models import EMBEDDING_DIM
 
-EMBEDDING_MODEL = "text-embedding-004"
+EMBEDDING_MODEL = "gemini-embedding-001"
 
 
 class GeminiNotConfiguredError(Exception):
@@ -79,7 +81,11 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     for _ in range(attempts):
         try:
-            result = client.models.embed_content(model=EMBEDDING_MODEL, contents=texts)
+            result = client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=texts,
+                config=types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIM),
+            )
             return [list(item.values) for item in result.embeddings]
         except Exception as exc:  # noqa: BLE001 -- any Gemini/network failure is retried
             status = _rejected_status(exc)
