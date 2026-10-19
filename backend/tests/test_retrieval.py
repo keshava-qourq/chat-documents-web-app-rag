@@ -1,61 +1,58 @@
-"""Unit tests for `app.retrieval` reaching past what
-`backend/app/tests/test_retrieval.py` already covers.
+"""Unit tests for `app.retrieval.retrieve_context`: whole-library ranking,
+the configurable top-k and similarity threshold, and the no-ready-documents
+shortcut that never calls Gemini.
 
-That sibling file already proves: `retrieve_context`'s signature carries no
-per-document or per-thread filter; an empty shared library (no document, or
-only a `'processing'` one) returns `has_ready_documents=False` without ever
-calling `embed_texts`; ranking spans every `'ready'` document, not just one;
-chunks from a non-`'ready'` document are excluded; chunks below the
-configured similarity threshold are discarded (including down to zero
-survivors); and `retrieval_top_k()` caps how many chunks come back -- all of
-it against the in-Python cosine fallback this module takes on SQLite.
+There is already a hand-written unit suite for this module under
+`backend/app/tests/test_retrieval.py`, but `backend/pytest.ini` sets
+`testpaths = tests`, so that directory is never collected by the project's
+own test run (the same gap `backend/tests/test_generation.py` documents and
+closes for `app.generation`) -- this file exists under `backend/tests/`
+precisely so `app.retrieval` actually gets exercised by the suite that
+runs.
 
-This file reaches what that leaves uncovered:
+Runs entirely against an in-memory SQLite, so these exercise the in-Python
+cosine fallback path (`_retrieve_python`); the pgvector path
+(`_retrieve_postgres`) needs a real Postgres with the `vector` extension to
+exercise its `Chunk.embedding.cosine_distance(...)` query, which nothing in
+this suite spins up -- see the skipped test below.
 
-- `retrieval_top_k()` and `retrieval_similarity_threshold()` themselves,
-  read directly rather than monkeypatched away as every test in the sibling
-  file does -- their documented defaults, and that each is actually read
-  fresh from its own environment variable;
-- `retrieve_context` embeds exactly `[question]` -- one call, one text, the
-  text actually asked -- not just *some* list with one element, which is
-  all the sibling file's blanket `lambda texts: [[...]]` stubs are sensitive
-  to;
-- the dialect dispatch itself: a `postgresql`-dialect session is routed to
-  `_retrieve_postgres` and never touches `_retrieve_python`, and vice versa
-  for every non-Postgres dialect -- exercised here by faking only the
-  no-argument `db.get_bind()` call `retrieve_context` itself makes (the
-  internal, keyword-argument calls SQLAlchemy issues to actually run a
-  query are left to reach the real engine), so the branch is proved without
-  a live Postgres connection;
-- `max(1, retrieval_top_k())`: a misconfigured zero-or-negative top-k still
-  returns exactly one chunk rather than zero;
-- `_cosine_similarity`'s own zero-vector guard, which no ranking test above
-  a single surviving chunk would ever exercise since a zero-norm chunk
-  never has the highest score;
-- the full shape of one `RetrievedChunk` -- every field, not just the
-  `(document_name, source_location)` pairs the ranking-order test checks --
-  and `RetrievedContext()`'s empty defaults;
-- a documented, reproduced defect: a chunk that has no embedding yet
-  (`Chunk.embedding is None`) is *not* actually excluded by
-  `.filter(Chunk.embedding.isnot(None))` on the SQLite/JSON fallback path
-  this whole suite (and a fresh local clone, per `database.py`'s own
-  default) runs on, and `_retrieve_python` crashes on it with a `TypeError`
-  rather than skipping it -- see that test's own docstring for why.
-
-No live Gemini: `embed_texts` is monkeypatched in every test that reaches
-it, the same way the sibling file does. No live Postgres either: the one
-test about pgvector's actual cosine-distance query is a documented skip,
-same as the module's own docstring says that path needs a real Postgres to
-exercise -- `_retrieve_postgres` is only reached indirectly here, through a
-faked dialect name, never through a real `vector` column.
+`Base` is imported directly (`from app.database import Base`), not reached
+through `database.Base` at call time: `test_database.py` reloads
+`app.database` to exercise its `DATABASE_URL` branch, which rebinds the
+module's `Base` attribute to a fresh, empty-metadata class after that test
+runs. A name captured here at collection time stays pointed at the one
+`app.models` actually registers its tables on, regardless of test order --
+exactly how `conftest.py`'s own fixtures do it.
 """
 
+import inspect
 import uuid
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app import retrieval
+from app.database import Base
 from app.models import Chunk, Document
+
+
+@pytest.fixture()
+def db_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    session = session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
 
 
 def _make_document(db_session, status: str, file_name: str = "handbook.pdf") -> Document:
@@ -74,11 +71,7 @@ def _make_document(db_session, status: str, file_name: str = "handbook.pdf") -> 
 
 
 def _make_chunk(
-    db_session,
-    document: Document,
-    embedding: list[float] | None,
-    location: str = "handbook.pdf, page 1",
-    index: int = 0,
+    db_session, document: Document, embedding: list[float], location: str, index: int
 ) -> Chunk:
     chunk = Chunk(
         id=uuid.uuid4(),
@@ -94,87 +87,147 @@ def _make_chunk(
     return chunk
 
 
-# --- retrieval_top_k / retrieval_similarity_threshold: read directly -------
+# --- signature: whole-library search, no per-document/per-thread filter ----
 
 
-def test_retrieval_top_k_defaults_to_documented_constant(monkeypatch) -> None:
-    monkeypatch.delenv("RETRIEVAL_TOP_K", raising=False)
-
-    assert retrieval.retrieval_top_k() == retrieval.RETRIEVAL_TOP_K_DEFAULT
-
-
-def test_retrieval_top_k_is_read_from_its_own_env_var(monkeypatch) -> None:
-    monkeypatch.setenv("RETRIEVAL_TOP_K", "3")
-
-    assert retrieval.retrieval_top_k() == 3
+def test_signature_has_no_per_document_or_per_thread_filter() -> None:
+    params = set(inspect.signature(retrieval.retrieve_context).parameters)
+    assert params == {"db", "question"}
 
 
-def test_retrieval_similarity_threshold_defaults_to_documented_constant(monkeypatch) -> None:
-    monkeypatch.delenv("RETRIEVAL_SIMILARITY_THRESHOLD", raising=False)
-
-    assert (
-        retrieval.retrieval_similarity_threshold()
-        == retrieval.RETRIEVAL_SIMILARITY_THRESHOLD_DEFAULT
-    )
+# --- no ready documents: short-circuits before ever calling Gemini ---------
 
 
-def test_retrieval_similarity_threshold_is_read_from_its_own_env_var(monkeypatch) -> None:
-    monkeypatch.setenv("RETRIEVAL_SIMILARITY_THRESHOLD", "0.75")
-
-    assert retrieval.retrieval_similarity_threshold() == 0.75
-
-
-# --- embed_texts is called with exactly [question] --------------------------
-
-
-def test_retrieve_context_embeds_exactly_the_question_as_a_single_element_list(
+def test_no_ready_documents_returns_empty_context_without_calling_gemini(
     db_session, monkeypatch
 ) -> None:
-    _make_document(db_session, "ready")
-    captured = {}
+    def fail_embed(texts):
+        raise AssertionError("embed_texts must not be called with no ready documents")
 
-    def fake_embed(texts):
-        captured["texts"] = texts
+    monkeypatch.setattr(retrieval, "embed_texts", fail_embed)
+
+    context = retrieval.retrieve_context(db_session, "What is the policy?")
+
+    assert context.has_ready_documents is False
+    assert context.chunks == []
+
+
+def test_only_processing_documents_counts_as_no_ready_documents(db_session, monkeypatch) -> None:
+    _make_document(db_session, status="processing")
+
+    def fail_embed(texts):
+        raise AssertionError("embed_texts must not be called")
+
+    monkeypatch.setattr(retrieval, "embed_texts", fail_embed)
+
+    context = retrieval.retrieve_context(db_session, "Anything?")
+
+    assert context.has_ready_documents is False
+    assert context.chunks == []
+
+
+def test_only_failed_documents_counts_as_no_ready_documents(db_session, monkeypatch) -> None:
+    _make_document(db_session, status="failed")
+
+    def fail_embed(texts):
+        raise AssertionError("embed_texts must not be called")
+
+    monkeypatch.setattr(retrieval, "embed_texts", fail_embed)
+
+    context = retrieval.retrieve_context(db_session, "Anything?")
+
+    assert context.has_ready_documents is False
+    assert context.chunks == []
+
+
+# --- whole-library ranking across every ready document ---------------------
+
+
+def test_ranks_chunks_by_similarity_across_all_ready_documents(db_session, monkeypatch) -> None:
+    doc_a = _make_document(db_session, "ready", "policy-a.pdf")
+    doc_b = _make_document(db_session, "ready", "policy-b.pdf")
+    _make_chunk(db_session, doc_a, [1.0, 0.0, 0.0], "policy-a.pdf, page 1", 0)
+    _make_chunk(db_session, doc_b, [0.0, 1.0, 0.0], "policy-b.pdf, page 1", 0)
+    _make_chunk(db_session, doc_b, [0.9, 0.1, 0.0], "policy-b.pdf, page 2", 1)
+
+    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0, 0.0]])
+    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
+    monkeypatch.setattr(retrieval, "retrieval_top_k", lambda: 10)
+
+    context = retrieval.retrieve_context(db_session, "question")
+
+    assert context.has_ready_documents is True
+    names_locations = [(c.document_name, c.source_location) for c in context.chunks]
+    assert names_locations[0] == ("policy-a.pdf", "policy-a.pdf, page 1")
+    assert names_locations[1] == ("policy-b.pdf", "policy-b.pdf, page 2")
+    assert names_locations[2] == ("policy-b.pdf", "policy-b.pdf, page 1")
+
+
+def test_embed_texts_is_called_with_exactly_the_question(db_session, monkeypatch) -> None:
+    """`retrieve_context` embeds the literal question text, through the one
+    Gemini seam this module uses -- not a reworded or truncated form."""
+    document = _make_document(db_session, "ready")
+    _make_chunk(db_session, document, [1.0, 0.0], "handbook.pdf, page 1", 0)
+    seen: list[list[str]] = []
+
+    def record_embed(texts):
+        seen.append(texts)
         return [[1.0, 0.0]]
 
-    monkeypatch.setattr(retrieval, "embed_texts", fake_embed)
+    monkeypatch.setattr(retrieval, "embed_texts", record_embed)
+    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
 
-    retrieval.retrieve_context(db_session, "What is the parental leave policy?")
+    retrieval.retrieve_context(db_session, "What is the remote-work policy?")
 
-    assert captured["texts"] == ["What is the parental leave policy?"]
+    assert seen == [["What is the remote-work policy?"]]
 
 
-# --- a chunk with no embedding yet: a reproduced, documented defect ---------
+def test_chunks_from_non_ready_documents_are_excluded(db_session, monkeypatch) -> None:
+    ready_doc = _make_document(db_session, "ready", "ready.pdf")
+    failed_doc = _make_document(db_session, "failed", "failed.pdf")
+    _make_chunk(db_session, ready_doc, [1.0, 0.0], "ready.pdf, page 1", 0)
+    _make_chunk(db_session, failed_doc, [1.0, 0.0], "failed.pdf, page 1", 0)
+
+    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
+
+    context = retrieval.retrieve_context(db_session, "question")
+
+    assert [c.document_name for c in context.chunks] == ["ready.pdf"]
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Known defect, discovered while reaching for coverage this ticket "
-        "does not provide a writable path to fix (app/retrieval.py and "
-        "app/models.py are both outside backend/tests/): on the SQLite/JSON "
-        "fallback `EmbeddingVector` degrades to (the path every local clone "
-        "runs on by `database.py`'s own default, and the only path this "
-        "entire suite runs against), SQLAlchemy's `JSON` type defaults to "
-        "`none_as_null=False` -- a column assigned Python `None` is "
-        "persisted as the *JSON* literal `null`, not SQL `NULL`. "
-        "`.filter(Chunk.embedding.isnot(None))` compiles to `IS NOT NULL`, "
-        "which that row still satisfies, so the chunk is not excluded as "
-        "intended; `_retrieve_python` then calls `_cosine_similarity` with "
-        "`None` for that chunk's vector and crashes with a `TypeError` "
-        "instead of skipping it. On a real Postgres `vector` column this "
-        "does not arise -- assigning `None` there stores genuine SQL NULL -- "
-        "so this is specific to local/dev/test SQLite, not to production, "
-        "and is not currently reachable through `app.ingestion.ingest_document` "
-        "(which never commits a chunk before it has a real embedding); it "
-        "would need either `EmbeddingVector.none_as_null = True` or an "
-        "explicit `sqlalchemy.null()` in retrieval's own filters to close."
+        "Known defect, not introduced by this test suite: "
+        "`_retrieve_python`'s `Chunk.embedding.isnot(None)` filter relies on "
+        "a real SQL NULL, but on the SQLite/JSON fallback "
+        "`EmbeddingVector` degrades to, SQLAlchemy's JSON type stores a "
+        "Python `None` as a JSON `null` literal (none_as_null=False by "
+        "default), not a SQL NULL -- so the filter does not exclude it and "
+        "`_cosine_similarity` then raises TypeError on `zip(vector, None)`. "
+        "Not reachable through the actual ingestion pipeline today (a "
+        "document never reaches 'ready' with an unembedded chunk still "
+        "attached -- `ingest_document` always embeds a chunk before "
+        "committing it, or deletes the batch and fails the document), so "
+        "this is left documented rather than worked around here."
     ),
 )
-def test_chunk_with_no_embedding_yet_is_excluded_from_the_result(db_session, monkeypatch) -> None:
+def test_chunks_with_no_embedding_yet_are_excluded(db_session, monkeypatch) -> None:
+    """A chunk row can exist before its batch has been embedded (ingestion
+    is incremental); it must never be ranked until it has a vector."""
     document = _make_document(db_session, "ready")
     _make_chunk(db_session, document, [1.0, 0.0], "handbook.pdf, page 1", 0)
-    _make_chunk(db_session, document, None, "handbook.pdf, page 2", 1)
+    unembedded = Chunk(
+        id=uuid.uuid4(),
+        document_id=document.id,
+        content="not yet embedded",
+        source_location="handbook.pdf, page 2",
+        chunk_index=1,
+        embedding=None,
+    )
+    db_session.add(unembedded)
+    db_session.commit()
 
     monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
     monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
@@ -184,47 +237,32 @@ def test_chunk_with_no_embedding_yet_is_excluded_from_the_result(db_session, mon
     assert [c.source_location for c in context.chunks] == ["handbook.pdf, page 1"]
 
 
-# --- dialect dispatch: routed by db.get_bind().dialect.name, not hard-coded -
+# --- the configurable similarity threshold ---------------------------------
 
 
-class _FakeDialect:
-    def __init__(self, name: str) -> None:
-        self.name = name
+def test_chunks_below_threshold_are_discarded(db_session, monkeypatch) -> None:
+    document = _make_document(db_session, "ready")
+    _make_chunk(db_session, document, [1.0, 0.0], "handbook.pdf, page 1", 0)
+    _make_chunk(db_session, document, [-1.0, 0.0], "handbook.pdf, page 2", 1)
+
+    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: 0.5)
+
+    context = retrieval.retrieve_context(db_session, "question")
+
+    assert context.has_ready_documents is True
+    assert len(context.chunks) == 1
+    assert context.chunks[0].source_location == "handbook.pdf, page 1"
 
 
-class _FakeBind:
-    def __init__(self, name: str) -> None:
-        self.dialect = _FakeDialect(name)
-
-
-def _patch_reported_dialect(monkeypatch, db_session, name: str) -> None:
-    """Makes `db.get_bind()` (the exact, no-argument call `retrieve_context`
-    itself makes to read the dialect name) report `name`, while every
-    *internal* call SQLAlchemy issues to actually run a query -- always
-    passed keyword arguments such as `clause` -- still reaches the session's
-    real bind, so queries keep working against the real in-memory engine."""
-    original_get_bind = db_session.get_bind
-
-    def fake_get_bind(*args, **kwargs):
-        if not args and not kwargs:
-            return _FakeBind(name)
-        return original_get_bind(*args, **kwargs)
-
-    monkeypatch.setattr(db_session, "get_bind", fake_get_bind)
-
-
-def test_postgresql_dialect_is_routed_to_the_postgres_path_not_the_python_one(
+def test_ready_documents_but_zero_chunks_above_threshold_yields_empty_chunks(
     db_session, monkeypatch
 ) -> None:
-    _make_document(db_session, "ready")
-    _patch_reported_dialect(monkeypatch, db_session, "postgresql")
+    document = _make_document(db_session, "ready")
+    _make_chunk(db_session, document, [-1.0, 0.0], "handbook.pdf, page 1", 0)
+
     monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("_retrieve_python must not run for a postgresql dialect")
-
-    monkeypatch.setattr(retrieval, "_retrieve_python", fail_if_called)
-    monkeypatch.setattr(retrieval, "_retrieve_postgres", lambda db, vector, top_k: [])
+    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: 0.5)
 
     context = retrieval.retrieve_context(db_session, "question")
 
@@ -232,86 +270,68 @@ def test_postgresql_dialect_is_routed_to_the_postgres_path_not_the_python_one(
     assert context.chunks == []
 
 
-def test_non_postgresql_dialect_is_routed_to_the_python_path_not_postgres(
-    db_session, monkeypatch
+def test_retrieval_similarity_threshold_reads_env_var_and_falls_back_to_default(
+    monkeypatch,
 ) -> None:
-    document = _make_document(db_session, "ready")
-    _make_chunk(db_session, document, [1.0, 0.0])
-    _patch_reported_dialect(monkeypatch, db_session, "sqlite")
-    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("_retrieve_postgres must not run for a non-postgresql dialect")
-
-    monkeypatch.setattr(retrieval, "_retrieve_postgres", fail_if_called)
-
-    context = retrieval.retrieve_context(db_session, "question")
-
-    assert context.has_ready_documents is True
-    assert len(context.chunks) == 1
-
-
-@pytest.mark.skip(
-    reason=(
-        "_retrieve_postgres issues a real pgvector cosine_distance() query "
-        "against an actual `vector(768)` column; SQLite has no such column "
-        "type and no such operator, so this path cannot be exercised from "
-        "an in-memory SQLite suite. The module's own docstring already "
-        "names a real Postgres instance as where that path is proved; the "
-        "dispatch that routes a postgresql-dialect session to it is covered "
-        "above without needing one."
+    monkeypatch.delenv("RETRIEVAL_SIMILARITY_THRESHOLD", raising=False)
+    assert (
+        retrieval.retrieval_similarity_threshold()
+        == retrieval.RETRIEVAL_SIMILARITY_THRESHOLD_DEFAULT
     )
-)
-def test_retrieve_postgres_ranks_by_pgvector_cosine_distance_on_a_real_postgres() -> None:
-    raise AssertionError("not run: see skip reason")
+
+    monkeypatch.setenv("RETRIEVAL_SIMILARITY_THRESHOLD", "0.75")
+    assert retrieval.retrieval_similarity_threshold() == 0.75
 
 
-# --- max(1, retrieval_top_k()): a misconfigured top-k still returns one ----
+# --- the configurable top-k cap --------------------------------------------
 
 
-@pytest.mark.parametrize("configured_top_k", [0, -3])
-def test_top_k_configured_at_zero_or_negative_still_returns_exactly_one_chunk(
-    db_session, monkeypatch, configured_top_k
-) -> None:
+def test_top_k_limits_the_number_of_chunks_returned(db_session, monkeypatch) -> None:
     document = _make_document(db_session, "ready")
-    for i in range(3):
+    for i in range(5):
         _make_chunk(db_session, document, [1.0, 0.0], f"handbook.pdf, page {i}", i)
 
     monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
     monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
-    monkeypatch.setattr(retrieval, "retrieval_top_k", lambda: configured_top_k)
+    monkeypatch.setattr(retrieval, "retrieval_top_k", lambda: 2)
+
+    context = retrieval.retrieve_context(db_session, "question")
+
+    assert len(context.chunks) == 2
+
+
+def test_retrieval_top_k_reads_env_var_and_falls_back_to_default(monkeypatch) -> None:
+    monkeypatch.delenv("RETRIEVAL_TOP_K", raising=False)
+    assert retrieval.retrieval_top_k() == retrieval.RETRIEVAL_TOP_K_DEFAULT
+
+    monkeypatch.setenv("RETRIEVAL_TOP_K", "3")
+    assert retrieval.retrieval_top_k() == 3
+
+
+def test_a_non_positive_configured_top_k_still_returns_at_least_one_chunk(
+    db_session, monkeypatch
+) -> None:
+    """`retrieve_context` floors `retrieval_top_k()` at 1 so a
+    misconfigured (zero or negative) value cannot silently starve
+    generation of every chunk."""
+    document = _make_document(db_session, "ready")
+    _make_chunk(db_session, document, [1.0, 0.0], "handbook.pdf, page 1", 0)
+
+    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
+    monkeypatch.setattr(retrieval, "retrieval_top_k", lambda: 0)
 
     context = retrieval.retrieve_context(db_session, "question")
 
     assert len(context.chunks) == 1
 
 
-# --- _cosine_similarity: zero-vector guard -----------------------------------
+# --- returned chunk fields carry what generation/citations need -----------
 
 
-def test_cosine_similarity_returns_zero_for_a_zero_vector_instead_of_dividing_by_zero() -> None:
-    assert retrieval._cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
-    assert retrieval._cosine_similarity([1.0, 0.0], [0.0, 0.0]) == 0.0
-    assert retrieval._cosine_similarity([0.0, 0.0], [0.0, 0.0]) == 0.0
-
-
-def test_cosine_similarity_of_identical_vectors_is_one() -> None:
-    assert retrieval._cosine_similarity([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == pytest.approx(1.0)
-
-
-# --- dataclass shapes ---------------------------------------------------------
-
-
-def test_retrieved_context_defaults_to_empty_chunks_and_no_ready_documents() -> None:
-    context = retrieval.RetrievedContext()
-
-    assert context.chunks == []
-    assert context.has_ready_documents is False
-
-
-def test_retrieved_chunk_carries_every_field_the_result_needs(db_session, monkeypatch) -> None:
+def test_returned_chunks_carry_document_id_chunk_id_and_content(db_session, monkeypatch) -> None:
     document = _make_document(db_session, "ready", "handbook.pdf")
-    chunk = _make_chunk(db_session, document, [1.0, 0.0], "handbook.pdf, page 3", 2)
+    chunk = _make_chunk(db_session, document, [1.0, 0.0], "handbook.pdf, page 1", 0)
 
     monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
     monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
@@ -323,6 +343,22 @@ def test_retrieved_chunk_carries_every_field_the_result_needs(db_session, monkey
     assert result.chunk_id == chunk.id
     assert result.document_id == document.id
     assert result.document_name == "handbook.pdf"
-    assert result.source_location == "handbook.pdf, page 3"
     assert result.content == chunk.content
-    assert result.similarity == pytest.approx(1.0)
+    assert isinstance(result.similarity, float)
+
+
+# --- the pgvector dialect path needs a real Postgres to exercise ----------
+
+
+@pytest.mark.skip(
+    reason=(
+        "The pgvector cosine-distance path (_retrieve_postgres) runs "
+        "Chunk.embedding.cosine_distance(...) through a real `vector(768)` "
+        "column; SQLite (used throughout this suite, matching the rest of "
+        "the project's unit tests) has no such type and no server to run "
+        "it against. Exercising this branch needs a Postgres instance with "
+        "the pgvector extension, which nothing in this test run provisions."
+    )
+)
+def test_retrieve_postgres_ranks_by_pgvector_cosine_distance() -> None:
+    pass

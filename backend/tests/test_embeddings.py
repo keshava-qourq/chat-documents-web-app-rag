@@ -1,209 +1,289 @@
 """Unit tests for `app.embeddings.embed_texts`.
 
-`backend/app/tests/test_ingestion.py` already proves the missing-key
-immediate failure and a flaky-then-succeeds retry sequence, and
-`backend/app/tests/test_gemini_config_error.py` already proves a 401
-rejection is raised immediately (no retry spent), names `GEMINI_API_KEY`,
-and never echoes the key value. This file reaches what those two leave
-uncovered:
+Exercises the module's one public entry point directly -- no database, no
+object store, no live Gemini call -- standing in for the Gemini SDK with a
+fake `genai.Client` the way `backend/app/tests/test_ingestion.py` and
+`backend/app/tests/test_gemini_config_error.py` already do, since those
+files sit outside this suite's `testpaths` (`backend/tests`, per
+`pytest.ini`) and so are never actually collected by a bare `pytest` run
+from `backend/`. This file is what makes `app.embeddings` actually covered.
 
-- the shape of a successful multi-text call: vectors come back in the same
-  order as the input texts, the configured model name and api key are the
-  ones actually forwarded to the Gemini client;
-- the second rejection status (403), and the two other shapes
-  `_rejected_status` is documented to recognise a rejection from -- a
-  `code` attribute instead of `status_code`, and a bare message with no
-  numeric attribute at all;
-- `GeminiNotConfiguredError` never even constructing a Gemini client, let
-  alone calling it;
-- `embedding_max_retries()` configured at zero or below still making
-  exactly one attempt rather than looping zero times or raising something
-  else;
-- the exhausted-retries `EmbeddingServiceError` keeping the last underlying
-  exception as its `__cause__`, for anyone who inspects the chain rather
-  than just the message.
+Three behaviours are pinned down, per the module's own docstring:
 
-No live Gemini: every test installs a fake `genai.Client` the same way the
-sibling suites do.
+* no key configured -> `GeminiNotConfiguredError`, immediately, no Gemini
+  call spent on it;
+* a key Gemini itself rejects (401/403, in whatever shape the SDK surfaces
+  it) -> `GeminiKeyRejectedError`, immediately, with the status code and no
+  retry wasted on a call that cannot succeed;
+* any other failure -> retried up to `embedding_max_retries()` times (at
+  least once, however that is configured) before `EmbeddingServiceError`;
+
+plus the success path's actual contract: one vector per input text, in the
+same order, from a single call naming the configured model.
 """
 
 import pytest
 
 from app import embeddings
+from app.config import EMBEDDING_MAX_RETRIES_DEFAULT
+
+# --- fakes -------------------------------------------------------------
 
 
 class _FakeEmbedding:
-    def __init__(self, values):
+    def __init__(self, values: list[float]) -> None:
         self.values = values
 
 
 class _FakeResult:
-    def __init__(self, vectors):
+    def __init__(self, vectors: list[list[float]]) -> None:
         self.embeddings = [_FakeEmbedding(v) for v in vectors]
 
 
-def _install_fake_client(monkeypatch, models_factory):
-    """Installs a fake `genai.Client` whose `.models` is `models_factory()`,
-    and returns the list of api keys the client was constructed with."""
-    constructed_with = []
+class _RecordingModels:
+    """Succeeds immediately, returning a distinct vector per input text, and
+    records the exact arguments it was called with."""
 
-    class FakeClient:
-        def __init__(self, api_key):
-            constructed_with.append(api_key)
-            self.models = models_factory()
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
 
-    monkeypatch.setattr(embeddings.genai, "Client", FakeClient)
-    return constructed_with
+    def embed_content(self, model, contents):
+        self.calls.append({"model": model, "contents": contents})
+        return _FakeResult([[float(i), float(i) + 0.5] for i in range(len(contents))])
 
 
-# --- successful call: order, model, key forwarded ---------------------------
+class _FlakyThenSucceedsModels:
+    """Fails with a plain, non-auth exception on every call before the Nth,
+    then succeeds -- standing in for a transient network/quota failure."""
+
+    def __init__(self, succeed_on_call: int) -> None:
+        self.succeed_on_call = succeed_on_call
+        self.calls = 0
+
+    def embed_content(self, model, contents):
+        self.calls += 1
+        if self.calls < self.succeed_on_call:
+            raise RuntimeError("transient failure")
+        return _FakeResult([[0.1] for _ in contents])
 
 
-def test_embed_texts_returns_one_vector_per_input_in_the_same_order(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "a-key")
-    captured = {}
+class _AlwaysFailsModels:
+    def __init__(self, exc_factory=lambda: RuntimeError("always fails")) -> None:
+        self.calls = 0
+        self._exc_factory = exc_factory
 
-    class FakeModels:
-        def embed_content(self, model, contents):
-            captured["model"] = model
-            captured["contents"] = list(contents)
-            return _FakeResult([[1.0, 1.1], [2.0, 2.2], [3.0, 3.3]])
-
-    _install_fake_client(monkeypatch, lambda: FakeModels())
-
-    result = embeddings.embed_texts(["first", "second", "third"])
-
-    assert result == [[1.0, 1.1], [2.0, 2.2], [3.0, 3.3]]
-    assert captured["contents"] == ["first", "second", "third"]
-    assert captured["model"] == embeddings.EMBEDDING_MODEL
+    def embed_content(self, model, contents):
+        self.calls += 1
+        raise self._exc_factory()
 
 
-def test_embed_texts_passes_the_configured_api_key_to_the_gemini_client(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "the-configured-key")
+def _install_fake_client(monkeypatch, models) -> None:
+    class _FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.models = models
 
-    class FakeModels:
-        def embed_content(self, model, contents):
-            return _FakeResult([[0.0, 0.0] for _ in contents])
-
-    constructed_with = _install_fake_client(monkeypatch, lambda: FakeModels())
-
-    embeddings.embed_texts(["only text"])
-
-    assert constructed_with == ["the-configured-key"]
+    monkeypatch.setattr(embeddings.genai, "Client", _FakeClient)
 
 
-# --- not configured: no client is ever constructed --------------------------
+def _forbid_client(monkeypatch) -> None:
+    """Installed when Gemini must never be reached at all."""
+
+    def _raise_if_constructed(*args, **kwargs):
+        raise AssertionError("genai.Client must not be constructed")
+
+    monkeypatch.setattr(embeddings.genai, "Client", _raise_if_constructed)
 
 
-def test_embed_texts_not_configured_never_constructs_a_gemini_client(monkeypatch):
+# --- not configured ----------------------------------------------------
+
+
+def test_raises_not_configured_when_key_is_unset(monkeypatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    constructed_with = []
+    _forbid_client(monkeypatch)
 
-    class FakeClient:
-        def __init__(self, api_key):
-            constructed_with.append(api_key)
+    with pytest.raises(embeddings.GeminiNotConfiguredError) as exc_info:
+        embeddings.embed_texts(["hello"])
 
-    monkeypatch.setattr(embeddings.genai, "Client", FakeClient)
+    assert "GEMINI_API_KEY" in str(exc_info.value)
+    assert exc_info.value.code == "gemini_not_configured"
+
+
+def test_raises_not_configured_when_key_is_empty_string(monkeypatch) -> None:
+    # app.config.gemini_api_key() treats "" as unset; embed_texts must honour
+    # that, not pass an empty key down to the SDK.
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    _forbid_client(monkeypatch)
 
     with pytest.raises(embeddings.GeminiNotConfiguredError):
         embeddings.embed_texts(["hello"])
 
-    assert constructed_with == []
+
+# --- success path --------------------------------------------------------
 
 
-# --- rejected key: the other status, and the other detection shapes ---------
+def test_returns_one_vector_per_text_in_the_same_order(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    models = _RecordingModels()
+    _install_fake_client(monkeypatch, models)
+
+    result = embeddings.embed_texts(["first", "second", "third"])
+
+    assert result == [[0.0, 0.5], [1.0, 1.5], [2.0, 2.5]]
 
 
-class _RejectingModels:
-    def __init__(self, raise_fn):
-        self.calls = 0
-        self._raise_fn = raise_fn
+def test_calls_the_configured_embedding_model_with_every_text_in_one_call(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    models = _RecordingModels()
+    _install_fake_client(monkeypatch, models)
 
-    def embed_content(self, model, contents):
-        self.calls += 1
-        raise self._raise_fn()
+    embeddings.embed_texts(["alpha", "beta"])
 
-
-def test_embed_texts_rejected_key_via_403_status_code_attribute_raises_immediately(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
-
-    def make_error():
-        error = RuntimeError("Gemini rejected the request (status 403)")
-        error.status_code = 403
-        return error
-
-    models = _RejectingModels(make_error)
-    _install_fake_client(monkeypatch, lambda: models)
-
-    with pytest.raises(embeddings.GeminiKeyRejectedError) as exc_info:
-        embeddings.embed_texts(["hello"])
-
-    assert exc_info.value.status_code == 403
-    assert "403" in str(exc_info.value)
-    assert models.calls == 1  # no retry spent on a key that cannot succeed
+    assert len(models.calls) == 1
+    assert models.calls[0]["model"] == embeddings.EMBEDDING_MODEL
+    assert models.calls[0]["contents"] == ["alpha", "beta"]
 
 
-def test_embed_texts_rejected_key_detected_via_code_attribute_not_status_code(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
+# --- transient failure: retried -------------------------------------------
 
-    def make_error():
-        # Some SDK versions surface the auth failure as `code` rather than
-        # `status_code`; `_rejected_status` is documented to read either.
-        error = RuntimeError("auth failure")
-        error.code = 401
-        return error
 
-    models = _RejectingModels(make_error)
-    _install_fake_client(monkeypatch, lambda: models)
+def test_retries_a_transient_failure_before_succeeding(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
+    models = _FlakyThenSucceedsModels(succeed_on_call=3)
+    _install_fake_client(monkeypatch, models)
 
-    with pytest.raises(embeddings.GeminiKeyRejectedError) as exc_info:
-        embeddings.embed_texts(["hello"])
+    result = embeddings.embed_texts(["a", "b"])
 
-    assert exc_info.value.status_code == 401
+    assert models.calls == 3
+    assert result == [[0.1], [0.1]]
+
+
+def test_raises_embedding_service_error_once_every_retry_is_exhausted(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
+    models = _AlwaysFailsModels()
+    _install_fake_client(monkeypatch, models)
+
+    with pytest.raises(embeddings.EmbeddingServiceError) as exc_info:
+        embeddings.embed_texts(["a"])
+
+    assert models.calls == 2
+    assert exc_info.value.__cause__ is not None  # the last underlying failure is chained
+
+
+def test_uses_the_configured_number_of_retry_attempts(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "5")
+    models = _AlwaysFailsModels()
+    _install_fake_client(monkeypatch, models)
+
+    with pytest.raises(embeddings.EmbeddingServiceError):
+        embeddings.embed_texts(["a"])
+
+    assert models.calls == 5
+
+
+@pytest.mark.parametrize("configured_retries", ["0", "-3"])
+def test_always_attempts_at_least_once_even_when_configured_retries_is_not_positive(
+    monkeypatch, configured_retries
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", configured_retries)
+    models = _AlwaysFailsModels()
+    _install_fake_client(monkeypatch, models)
+
+    with pytest.raises(embeddings.EmbeddingServiceError):
+        embeddings.embed_texts(["a"])
+
     assert models.calls == 1
 
 
+def test_default_retry_count_is_used_when_unset(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    monkeypatch.delenv("EMBEDDING_MAX_RETRIES", raising=False)
+    models = _AlwaysFailsModels()
+    _install_fake_client(monkeypatch, models)
+
+    with pytest.raises(embeddings.EmbeddingServiceError):
+        embeddings.embed_texts(["a"])
+
+    assert models.calls == EMBEDDING_MAX_RETRIES_DEFAULT
+
+
+# --- key rejected: immediate, no retry -------------------------------------
+
+
+def _exc_with_status_code(code: int) -> Exception:
+    exc = RuntimeError(f"rejected (status {code})")
+    exc.status_code = code
+    return exc
+
+
+def _exc_with_code_attr(code: int) -> Exception:
+    exc = RuntimeError("rejected")
+    exc.code = code
+    return exc
+
+
+def _exc_with_message(message: str) -> Exception:
+    return RuntimeError(message)
+
+
 @pytest.mark.parametrize(
-    "message, expected_status",
+    ("exc_factory", "expected_status"),
     [
-        ("401 Unauthorized: invalid credentials", 401),
-        ("UNAUTHENTICATED: request had no valid authentication", 401),
-        ("403 Forbidden", 403),
-        ("PERMISSION_DENIED: caller lacks permission", 403),
-        ("API_KEY_INVALID: the provided key is invalid", 403),
+        (lambda: _exc_with_status_code(401), 401),
+        (lambda: _exc_with_status_code(403), 403),
+        (lambda: _exc_with_code_attr(401), 401),
+        (lambda: _exc_with_code_attr(403), 403),
+        (lambda: _exc_with_message("HTTP 401 error"), 401),
+        (lambda: _exc_with_message("UNAUTHENTICATED: bad credentials"), 401),
+        (lambda: _exc_with_message("HTTP 403 Forbidden"), 403),
+        (lambda: _exc_with_message("PERMISSION_DENIED: no access"), 403),
+        (lambda: _exc_with_message("API_KEY_INVALID"), 403),
     ],
 )
-def test_embed_texts_rejected_key_detected_from_message_alone(
-    monkeypatch, message, expected_status
-):
-    # No status_code/code attribute at all -- only the exception message
-    # carries the signal, which is one of the shapes the module's own
-    # docstring says `_rejected_status` must still recognise.
+def test_raises_key_rejected_immediately_for_every_recognised_rejection_shape(
+    monkeypatch, exc_factory, expected_status
+) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
-
-    def make_error():
-        return RuntimeError(message)
-
-    models = _RejectingModels(make_error)
-    _install_fake_client(monkeypatch, lambda: models)
+    models = _AlwaysFailsModels(exc_factory=exc_factory)
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "5")  # would retry 5x if misclassified
+    _install_fake_client(monkeypatch, models)
 
     with pytest.raises(embeddings.GeminiKeyRejectedError) as exc_info:
         embeddings.embed_texts(["hello"])
 
     assert exc_info.value.status_code == expected_status
+    assert exc_info.value.code == "gemini_key_rejected"
+    assert str(expected_status) in str(exc_info.value)
+    assert "GEMINI_API_KEY" in str(exc_info.value)
+    # The whole point of detecting a rejection up front: no retry is spent on
+    # a key that cannot possibly succeed, regardless of how many were configured.
     assert models.calls == 1
 
 
-def test_embed_texts_rejected_key_message_never_includes_the_key_value(monkeypatch):
+def test_an_unrecognised_failure_is_retried_rather_than_treated_as_a_rejection(
+    monkeypatch,
+) -> None:
+    # A plain failure that happens to mention neither a 401/403 status nor one
+    # of the recognised phrases must still be retried as a transient error,
+    # not misclassified as a key rejection.
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-key")
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
+    models = _AlwaysFailsModels(exc_factory=lambda: RuntimeError("503 Service Unavailable"))
+    _install_fake_client(monkeypatch, models)
+
+    with pytest.raises(embeddings.EmbeddingServiceError):
+        embeddings.embed_texts(["a"])
+
+    assert models.calls == 2
+
+
+def test_rejected_key_error_message_never_includes_the_key_value(monkeypatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "super-secret-value")
-
-    def make_error():
-        error = RuntimeError("rejected")
-        error.status_code = 403
-        return error
-
-    models = _RejectingModels(make_error)
-    _install_fake_client(monkeypatch, lambda: models)
+    models = _AlwaysFailsModels(exc_factory=lambda: _exc_with_status_code(401))
+    _install_fake_client(monkeypatch, models)
 
     with pytest.raises(embeddings.GeminiKeyRejectedError) as exc_info:
         embeddings.embed_texts(["hello"])
@@ -211,54 +291,15 @@ def test_embed_texts_rejected_key_message_never_includes_the_key_value(monkeypat
     assert "super-secret-value" not in str(exc_info.value)
 
 
-# --- retry count edge cases --------------------------------------------------
-
-
-@pytest.mark.parametrize("configured_retries", [0, -5])
-def test_embed_texts_makes_at_least_one_attempt_even_when_retries_configured_at_zero_or_below(
-    monkeypatch, configured_retries
-):
-    # `attempts = max(1, embedding_max_retries())`: a misconfigured value of
-    # zero or below must not skip the call entirely.
-    monkeypatch.setenv("GEMINI_API_KEY", "a-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", str(configured_retries))
-
-    class FakeModels:
-        def __init__(self):
-            self.calls = 0
-
-        def embed_content(self, model, contents):
-            self.calls += 1
-            raise RuntimeError("fails every time")
-
-    models = FakeModels()
-    _install_fake_client(monkeypatch, lambda: models)
-
-    with pytest.raises(embeddings.EmbeddingServiceError):
-        embeddings.embed_texts(["hello"])
-
-    assert models.calls == 1
-
-
-def test_embedding_service_error_keeps_the_last_underlying_exception_as_its_cause(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "a-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
-
-    errors = [RuntimeError("first failure"), RuntimeError("second failure")]
-
-    class FakeModels:
-        def __init__(self):
-            self.calls = 0
-
-        def embed_content(self, model, contents):
-            error = errors[self.calls]
-            self.calls += 1
-            raise error
-
-    models = FakeModels()
-    _install_fake_client(monkeypatch, lambda: models)
+def test_service_error_message_never_includes_the_key_value(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "another-secret-value")
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "1")
+    models = _AlwaysFailsModels(
+        exc_factory=lambda: RuntimeError("failed with key another-secret-value")
+    )
+    _install_fake_client(monkeypatch, models)
 
     with pytest.raises(embeddings.EmbeddingServiceError) as exc_info:
         embeddings.embed_texts(["hello"])
 
-    assert exc_info.value.__cause__ is errors[-1]
+    assert "another-secret-value" not in str(exc_info.value)

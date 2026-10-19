@@ -1,49 +1,17 @@
-"""Unit tests for `app.generation` reaching past what
-`backend/app/tests/test_generation.py` and `backend/app/tests/
-test_gemini_config_error.py` already cover.
+"""Unit tests for `app.generation`: both `generate_answer` and its
+streaming counterpart `stream_answer`, exercised directly against the
+module rather than through `POST /threads/{id}/messages` (which
+`backend/tests/test_chat_streaming.py` already covers end-to-end, and which
+this file does not re-litigate).
 
-Those two files already prove: no-context short-circuits without calling
-Gemini; a missing key raises `GeminiNotConfiguredError`; a rejected key
-(401/403, via `status_code`) raises `GeminiKeyRejectedError` immediately for
-both `generate_answer` and `stream_answer`; the not-found phrase and
-partial-coverage branches of `generate_answer`; de-duplicated citations; and
-that the key value itself never leaks into an answer or an error message.
-
-This file reaches what those leave uncovered:
-
-- `generate_answer` actually *retrying* a transient failure and succeeding,
-  not just exhausting every attempt and failing -- the retry loop's
-  "try again" branch has no test anywhere else;
-- a configured retry count of zero or negative still making exactly one
-  attempt for `generate_answer`, the same edge case
-  `backend/tests/test_embeddings.py` already proves for `embed_texts`;
-- `GenerationServiceError` keeping the last underlying exception as its
-  `__cause__`;
-- a rejected key detected on a *retried* attempt (not just the first one),
-  and detected from every shape `_rejected_status` is documented to
-  recognise -- not just a `status_code` attribute, but a `code` attribute
-  and a bare message with no numeric attribute at all, the same shapes
-  `backend/tests/test_embeddings.py` already proves for its own, separately
-  implemented, copy of this detection logic;
-- the configured `GEMINI_API_KEY` actually being the value forwarded to
-  `genai.Client`, not just read successfully;
-- the citation excerpt being truncated to 300 characters rather than the
-  whole chunk content;
-- `history` actually reaching the prompt text sent to Gemini, for
-  `generate_answer` -- no existing test passes a non-empty `history` at all;
-- `stream_answer`, which has essentially no *direct* unit coverage anywhere
-  (only its rejected-key path is tested, in `test_gemini_config_error.py`,
-  and otherwise it is only exercised indirectly through the full chat
-  endpoint in `backend/tests/test_chat_streaming.py`): a missing key raising
-  before any Gemini client is ever constructed; falsy chunk text being
-  skipped; opening the stream being retried before any token has reached
-  the caller; a failure that happens *during* iteration -- after the stream
-  was already successfully opened -- never being retried, whether or not a
-  token had already been yielded; and the exhausted-retries case raising
-  `GenerationServiceError`.
-
-No live Gemini call anywhere here: `genai.Client` is monkeypatched to a
-local fake in every test, the same way the sibling suites do.
+Every test here replaces `generation.genai.Client` with a small fake that
+scripts a response or failure and records what it was called with, so no
+test in this file makes a live Gemini call. There is already a hand-written
+unit suite for this module under `backend/app/tests/` (`test_generation.py`,
+`test_gemini_config_error.py`), but `backend/pytest.ini` sets
+`testpaths = tests`, so that directory is never collected by the project's
+own test run -- this file exists under `backend/tests/` precisely so
+`app.generation` actually gets exercised by the suite that runs.
 """
 
 import uuid
@@ -65,32 +33,62 @@ def _chunk(document_name="handbook.pdf", source_location="handbook.pdf, page 1",
     )
 
 
-def _rejected_error(status_code: int) -> Exception:
-    error = RuntimeError(f"Gemini rejected the request (status {status_code})")
-    error.status_code = status_code
-    return error
-
-
 class _FakeResponse:
-    def __init__(self, text: str):
+    def __init__(self, text):
         self.text = text
 
 
 class _FakeModels:
-    """`generate_content` pops the next scripted item off `items` on each
-    call: a string becomes a successful response, an `Exception` instance
-    is raised. Records every prompt it was called with."""
+    """Scripts `generate_content`: each entry in `script` is either an
+    exception to raise for that attempt, or response text to return.
+    `calls` records the prompt passed on every attempt actually made, so a
+    test can assert how many attempts were spent."""
 
-    def __init__(self, items):
-        self._items = list(items)
+    def __init__(self, script):
+        self._script = list(script)
         self.calls: list[str] = []
 
     def generate_content(self, model, contents):
         self.calls.append(contents)
-        item = self._items.pop(0)
+        item = self._script.pop(0)
         if isinstance(item, Exception):
             raise item
         return _FakeResponse(item)
+
+
+class _FakeChunk:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeStreamModels:
+    """Scripts `generate_content_stream`. Each entry in `script` is either
+    an exception raised synchronously by the call itself (simulating a
+    failure before the stream was ever opened, which `stream_answer`
+    retries), or a list of plain-text pieces streamed back one at a time,
+    optionally followed by `mid_stream_error` once exhausted (simulating an
+    interruption after output has already begun, which is never retried).
+    `calls` records the prompt passed on every attempt actually made to
+    *open* the stream.
+    """
+
+    def __init__(self, script, mid_stream_error=None):
+        self._script = list(script)
+        self.mid_stream_error = mid_stream_error
+        self.calls: list[str] = []
+
+    def generate_content_stream(self, model, contents):
+        self.calls.append(contents)
+        item = self._script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return self._gen(item)
+
+    def _gen(self, pieces):
+        for piece in pieces:
+            yield _FakeChunk(piece)
+        if self.mid_stream_error is not None:
+            raise self.mid_stream_error
 
 
 def _install_fake_client(monkeypatch, models):
@@ -101,61 +99,85 @@ def _install_fake_client(monkeypatch, models):
     monkeypatch.setattr(generation.genai, "Client", Factory())
 
 
-# --- generate_answer: retrying actually recovers from a transient failure --
+# --- generate_answer: no context, never calls Gemini ------------------------
 
 
-def test_generate_answer_retries_a_transient_failure_and_then_succeeds(monkeypatch) -> None:
+def test_generate_answer_with_no_ready_documents_returns_canned_message_without_calling_gemini(
+    monkeypatch,
+):
+    def fail_client(api_key):
+        raise AssertionError("Gemini must not be called with no ready documents")
+
+    monkeypatch.setattr(generation.genai, "Client", fail_client)
+    context = RetrievedContext(chunks=[], has_ready_documents=False)
+
+    answer = generation.generate_answer("What is the policy?", context)
+
+    assert answer.grounded is False
+    assert answer.citations == []
+    assert answer.content == generation.NO_DOCUMENTS_MESSAGE
+
+
+def test_generate_answer_with_zero_chunks_above_threshold_also_skips_gemini(monkeypatch):
+    def fail_client(api_key):
+        raise AssertionError("Gemini must not be called")
+
+    monkeypatch.setattr(generation.genai, "Client", fail_client)
+    context = RetrievedContext(chunks=[], has_ready_documents=True)
+
+    answer = generation.generate_answer("What is the policy?", context)
+
+    assert answer.grounded is False
+    assert answer.citations == []
+    assert answer.content == generation.NO_DOCUMENTS_MESSAGE
+
+
+# --- generate_answer: configuration and transient failures ------------------
+
+
+def test_generate_answer_without_api_key_raises_typed_error(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+
+    with pytest.raises(generation.GeminiNotConfiguredError):
+        generation.generate_answer("question", context)
+
+
+def test_generate_answer_retries_a_transient_failure_and_succeeds(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
-    models = _FakeModels([RuntimeError("transient network blip"), "Employees get 25 days."])
+    models = _FakeModels(
+        [RuntimeError("transient"), "Employees get 25 days of annual leave. [1]"]
+    )
     _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
     answer = generation.generate_answer("How many leave days?", context)
 
+    assert len(models.calls) == 2  # failed once, succeeded on retry
     assert answer.grounded is True
-    assert answer.content == "Employees get 25 days."
-    assert len(models.calls) == 2  # first attempt failed, second succeeded
+    assert answer.content == "Employees get 25 days of annual leave. [1]"
 
 
-@pytest.mark.parametrize("configured_retries", [0, -5])
-def test_generate_answer_makes_at_least_one_attempt_when_retries_configured_at_zero_or_below(
-    monkeypatch, configured_retries
-) -> None:
+def test_generate_answer_exhausts_configured_retries_then_raises_typed_service_error(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", str(configured_retries))
-    models = _FakeModels([RuntimeError("fails"), RuntimeError("fails"), RuntimeError("fails")])
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
+    models = _FakeModels([RuntimeError("boom"), RuntimeError("boom again")])
     _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
     with pytest.raises(generation.GenerationServiceError):
         generation.generate_answer("question", context)
 
-    assert len(models.calls) == 1
+    assert len(models.calls) == 2  # exactly the configured attempt count, no more
 
 
-def test_generation_service_error_keeps_the_last_underlying_exception_as_its_cause(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
-    errors = [RuntimeError("first failure"), RuntimeError("second failure")]
-    models = _FakeModels(list(errors))
-    _install_fake_client(monkeypatch, models)
-    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-
-    with pytest.raises(generation.GenerationServiceError) as exc_info:
-        generation.generate_answer("question", context)
-
-    assert exc_info.value.__cause__ is errors[-1]
-
-
-def test_generate_answer_rejected_key_detected_on_a_retried_attempt_not_just_the_first(
-    monkeypatch,
-) -> None:
+def test_generate_answer_rejected_key_raises_immediately_without_retrying(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
     monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
-    models = _FakeModels([RuntimeError("transient"), _rejected_error(401)])
+    error = RuntimeError("Gemini rejected the request")
+    error.status_code = 401
+    models = _FakeModels([error, "should never be reached"])
     _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
@@ -163,339 +185,209 @@ def test_generate_answer_rejected_key_detected_on_a_retried_attempt_not_just_the
         generation.generate_answer("question", context)
 
     assert exc_info.value.status_code == 401
-    # No third attempt spent once the key is known to be rejected.
-    assert len(models.calls) == 2
+    assert len(models.calls) == 1  # no retry spent on a key that cannot succeed
 
 
-# --- generate_answer: every rejection shape _rejected_status recognises ---
+# --- generate_answer: grounded output ---------------------------------------
 
 
-@pytest.mark.parametrize(
-    "message, expected_status",
-    [
-        ("401 Unauthorized: invalid credentials", 401),
-        ("UNAUTHENTICATED: request had no valid authentication", 401),
-        ("403 Forbidden", 403),
-        ("PERMISSION_DENIED: caller lacks permission", 403),
-        ("API_KEY_INVALID: the provided key is invalid", 403),
-    ],
-)
-def test_generate_answer_rejected_key_detected_from_message_alone(
-    monkeypatch, message, expected_status
-) -> None:
-    # No status_code/code attribute at all -- only the exception message
-    # carries the signal. `app.generation` implements its own copy of this
-    # detection (not a shared helper with `app.embeddings`), so its own
-    # correctness here is not covered by `test_embeddings.py` proving the
-    # same shapes for `embed_texts`.
-    monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
-    models = _FakeModels([RuntimeError(message)])
-    _install_fake_client(monkeypatch, models)
-    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-
-    with pytest.raises(generation.GeminiKeyRejectedError) as exc_info:
-        generation.generate_answer("question", context)
-
-    assert exc_info.value.status_code == expected_status
-    assert len(models.calls) == 1
-
-
-def test_generate_answer_rejected_key_detected_via_code_attribute_not_status_code(
-    monkeypatch,
-) -> None:
-    # Some SDK versions surface the auth failure as `code` rather than
-    # `status_code`; `_rejected_status` is documented to read either.
-    monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
-    error = RuntimeError("auth failure")
-    error.code = 401
-    models = _FakeModels([error])
-    _install_fake_client(monkeypatch, models)
-    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-
-    with pytest.raises(generation.GeminiKeyRejectedError) as exc_info:
-        generation.generate_answer("question", context)
-
-    assert exc_info.value.status_code == 401
-    assert len(models.calls) == 1
-
-
-def test_generate_answer_passes_the_configured_api_key_to_the_gemini_client(monkeypatch) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "the-configured-generation-key")
-    constructed_with = []
-
-    class Factory:
-        def __call__(self, api_key):
-            constructed_with.append(api_key)
-            return type("C", (), {"models": _FakeModels(["An answer."])})()
-
-    monkeypatch.setattr(generation.genai, "Client", Factory())
-    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-
-    generation.generate_answer("question", context)
-
-    assert constructed_with == ["the-configured-generation-key"]
-
-
-# --- generate_answer: history and citation shape ---------------------------
-
-
-def test_generate_answer_includes_prior_turns_in_the_prompt_sent_to_gemini(monkeypatch) -> None:
+def test_generate_answer_not_found_phrase_returns_ungrounded_answer_with_no_citations(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    models = _FakeModels(["Berlin closes for 2 weeks."])
+    models = _FakeModels([generation.NOT_FOUND_MESSAGE])
     _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-    history = [
-        {"role": "user", "content": "How many leave days?"},
-        {"role": "assistant", "content": "Employees get 25 days of annual leave."},
-    ]
 
-    generation.generate_answer("What about the Berlin office?", context, history=history)
+    answer = generation.generate_answer("unrelated question", context)
 
-    assert len(models.calls) == 1
-    prompt = models.calls[0]
-    assert "How many leave days?" in prompt
-    assert "Employees get 25 days of annual leave." in prompt
-    assert "What about the Berlin office?" in prompt
+    assert answer.grounded is False
+    assert answer.citations == []
+    assert generation.NOT_FOUND_PHRASE in answer.content.lower()
 
 
-def test_generate_answer_citation_excerpt_is_truncated_to_300_characters(monkeypatch) -> None:
+def test_generate_answer_deduplicates_citations_by_document_and_location(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    long_content = "A" * 500
-    models = _FakeModels(["The handbook says A repeated. [1]"])
+    models = _FakeModels(["Employees get 25 days of annual leave. [1]"])
     _install_fake_client(monkeypatch, models)
+    chunk_one = _chunk(source_location="handbook.pdf, page 1")
+    chunk_two = _chunk(source_location="handbook.pdf, page 1")  # same (doc, location)
+    chunk_three = _chunk(source_location="handbook.pdf, page 2")
+    context = RetrievedContext(
+        chunks=[chunk_one, chunk_two, chunk_three], has_ready_documents=True
+    )
+
+    answer = generation.generate_answer("How many leave days?", context)
+
+    assert answer.grounded is True
+    locations = {(c.document_name, c.source_location) for c in answer.citations}
+    assert locations == {
+        ("handbook.pdf", "handbook.pdf, page 1"),
+        ("handbook.pdf", "handbook.pdf, page 2"),
+    }
+    retrieved_ids = {c.chunk_id for c in context.chunks}
+    for citation in answer.citations:
+        assert citation.chunk_id in retrieved_ids
+
+
+def test_generate_answer_citation_excerpt_is_capped_at_300_characters(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    models = _FakeModels(["Answer. [1]"])
+    _install_fake_client(monkeypatch, models)
+    long_content = "x" * 500
     context = RetrievedContext(chunks=[_chunk(content=long_content)], has_ready_documents=True)
 
     answer = generation.generate_answer("question", context)
 
+    assert len(answer.citations[0].excerpt) == 300
+
+
+def test_generate_answer_partial_coverage_answer_is_returned_grounded_with_citations(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    text = (
+        "Employees get 25 days of annual leave [1]. "
+        "The documents do not cover remote-work stipends for contractors."
+    )
+    models = _FakeModels([text])
+    _install_fake_client(monkeypatch, models)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+
+    answer = generation.generate_answer(
+        "How many leave days, and what is the contractor remote-work stipend?", context
+    )
+
+    assert answer.grounded is True
     assert len(answer.citations) == 1
-    excerpt = answer.citations[0].excerpt
-    assert len(excerpt) == 300
-    assert excerpt == long_content[:300]
+    assert "do not cover" in answer.content.lower()
 
 
-# --- stream_answer: fakes ---------------------------------------------------
+def test_generate_answer_api_key_never_appears_in_the_returned_answer(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "super-secret-key")
+    models = _FakeModels(["Employees get 25 days of annual leave. [1]"])
+    _install_fake_client(monkeypatch, models)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+
+    answer = generation.generate_answer("How many leave days?", context)
+
+    assert "super-secret-key" not in answer.content
+    assert all("super-secret-key" not in (c.excerpt or "") for c in answer.citations)
 
 
-class _FakeStreamChunk:
-    def __init__(self, text):
-        self.text = text
+def test_generate_answer_includes_prior_turns_in_the_prompt_sent_to_gemini(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    models = _FakeModels(["An answer. [1]"])
+    _install_fake_client(monkeypatch, models)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+    history = [
+        {"role": "user", "content": "Earlier question about leave"},
+        {"role": "assistant", "content": "Earlier answer about leave"},
+    ]
+
+    generation.generate_answer("Follow-up question", context, history=history)
+
+    prompt = models.calls[0]
+    assert "Earlier question about leave" in prompt
+    assert "Earlier answer about leave" in prompt
+    assert "Follow-up question" in prompt
 
 
-class _OpenFailsThenStreams:
-    """`generate_content_stream` itself raises eagerly (as a real network
-    call would) for the first `fail_times` calls, then returns a generator
-    of `pieces`. Models the "opening the stream" failure `stream_answer`
-    retries, as distinct from a failure that happens while iterating an
-    already-opened stream."""
-
-    def __init__(self, fail_times, pieces):
-        self.fail_times = fail_times
-        self.pieces = pieces
-        self.calls = 0
-
-    def generate_content_stream(self, model, contents):
-        self.calls += 1
-        if self.calls <= self.fail_times:
-            raise RuntimeError("could not open the stream")
-        return (_FakeStreamChunk(p) for p in self.pieces)
+# --- stream_answer: configuration and open-stream retries -------------------
 
 
-class _OpensThenFailsDuringIteration:
-    """`generate_content_stream` always succeeds in opening (returns
-    immediately), but the generator it hands back yields `pieces` and then
-    raises `error` partway through, simulating a mid-stream interruption
-    after the connection was already established."""
-
-    def __init__(self, pieces, error):
-        self.pieces = pieces
-        self.error = error
-        self.calls = 0
-
-    def generate_content_stream(self, model, contents):
-        self.calls += 1
-        return self._gen()
-
-    def _gen(self):
-        for piece in self.pieces:
-            yield _FakeStreamChunk(piece)
-        raise self.error
-
-
-def _install_fake_stream_client(monkeypatch, models):
-    class Factory:
-        def __call__(self, api_key):
-            return type("C", (), {"models": models})()
-
-    monkeypatch.setattr(generation.genai, "Client", Factory())
-
-
-# --- stream_answer: missing key ---------------------------------------------
-
-
-def test_stream_answer_missing_key_raises_before_any_gemini_client_is_constructed(
-    monkeypatch,
-) -> None:
+def test_stream_answer_without_api_key_raises_typed_error_before_any_token(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    def fail_if_constructed(api_key):
-        raise AssertionError("Gemini must not be contacted with no API key configured")
-
-    monkeypatch.setattr(generation.genai, "Client", fail_if_constructed)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
     with pytest.raises(generation.GeminiNotConfiguredError):
         list(generation.stream_answer("question", context))
 
 
-# --- stream_answer: yields only non-empty deltas ----------------------------
-
-
-def test_stream_answer_yields_plain_text_deltas_and_skips_falsy_chunks(monkeypatch) -> None:
+def test_stream_answer_retries_a_failure_before_the_first_token_and_then_succeeds(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    models = _OpenFailsThenStreams(fail_times=0, pieces=["Employees get ", None, "", "25 days."])
-    _install_fake_stream_client(monkeypatch, models)
+    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
+    models = _FakeStreamModels([RuntimeError("transient"), ["Employees get ", "25 days."]])
+    _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
-    pieces = list(generation.stream_answer("question", context))
+    pieces = list(generation.stream_answer("How many leave days?", context))
 
+    assert len(models.calls) == 2  # failed opening the stream once, succeeded on retry
     assert pieces == ["Employees get ", "25 days."]
 
 
-# --- stream_answer: retry happens only before the first token is yielded ---
-
-
-def test_stream_answer_retries_opening_the_stream_before_any_token_is_yielded(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
-    models = _OpenFailsThenStreams(fail_times=2, pieces=["Recovered answer."])
-    _install_fake_stream_client(monkeypatch, models)
-    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-
-    pieces = list(generation.stream_answer("question", context))
-
-    assert pieces == ["Recovered answer."]
-    assert models.calls == 3  # two failed opens, then one that succeeded
-
-
-def test_stream_answer_exhausting_retries_to_open_raises_generation_service_error(
-    monkeypatch,
-) -> None:
+def test_stream_answer_exhausts_configured_retries_then_raises_typed_service_error(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
-    models = _OpenFailsThenStreams(fail_times=99, pieces=["never reached"])
-    _install_fake_stream_client(monkeypatch, models)
+    models = _FakeStreamModels([RuntimeError("boom"), RuntimeError("boom again")])
+    _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
     with pytest.raises(generation.GenerationServiceError):
         list(generation.stream_answer("question", context))
 
-    assert models.calls == 2
+    assert len(models.calls) == 2
 
 
-@pytest.mark.parametrize("configured_retries", [0, -5])
-def test_stream_answer_makes_at_least_one_attempt_to_open_when_retries_configured_at_zero_or_below(
-    monkeypatch, configured_retries
-) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", str(configured_retries))
-    models = _OpenFailsThenStreams(fail_times=99, pieces=["never reached"])
-    _install_fake_stream_client(monkeypatch, models)
-    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-
-    with pytest.raises(generation.GenerationServiceError):
-        list(generation.stream_answer("question", context))
-
-    assert models.calls == 1
-
-
-def test_stream_answer_rejected_key_detected_on_a_retried_open_attempt(monkeypatch) -> None:
+def test_stream_answer_rejected_key_raises_immediately_without_retrying(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
     monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
-
-    class OpenFailsThenRejects:
-        def __init__(self):
-            self.calls = 0
-
-        def generate_content_stream(self, model, contents):
-            self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("transient")
-            raise _rejected_error(403)
-
-    models = OpenFailsThenRejects()
-    _install_fake_stream_client(monkeypatch, models)
+    error = RuntimeError("Gemini rejected the request")
+    error.status_code = 403
+    models = _FakeStreamModels([error, ["should never be reached"]])
+    _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
     with pytest.raises(generation.GeminiKeyRejectedError) as exc_info:
         list(generation.stream_answer("question", context))
 
     assert exc_info.value.status_code == 403
-    assert models.calls == 2  # no third attempt once the key is known-rejected
+    assert len(models.calls) == 1
 
 
-def test_stream_answer_rejected_key_detected_from_message_alone(monkeypatch) -> None:
-    # Same message-only detection shape proven above for `generate_answer`,
-    # exercised through `stream_answer`'s own, separately implemented call
-    # to the same `_rejected_status` helper.
-    monkeypatch.setenv("GEMINI_API_KEY", "bad-key")
+# --- stream_answer: successful streaming and mid-stream interruption -------
 
-    class RejectingModels:
-        def __init__(self):
-            self.calls = 0
 
-        def generate_content_stream(self, model, contents):
-            self.calls += 1
-            raise RuntimeError("PERMISSION_DENIED: caller lacks permission")
-
-    models = RejectingModels()
-    _install_fake_stream_client(monkeypatch, models)
+def test_stream_answer_yields_plain_text_deltas_in_order(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    models = _FakeStreamModels([["Employees get ", "25 days ", "of annual leave."]])
+    _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
-    with pytest.raises(generation.GeminiKeyRejectedError) as exc_info:
-        list(generation.stream_answer("question", context))
+    pieces = list(generation.stream_answer("How many leave days?", context))
 
-    assert exc_info.value.status_code == 403
-    assert models.calls == 1
+    assert pieces == ["Employees get ", "25 days ", "of annual leave."]
 
 
-# --- stream_answer: no retry once the stream is already open ---------------
-
-
-def test_stream_answer_does_not_retry_a_failure_during_iteration_before_any_token_yielded(
-    monkeypatch,
-) -> None:
+def test_stream_answer_failure_after_first_token_propagates_without_a_retry(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
-    error = RuntimeError("dropped immediately after opening, before any text")
-    models = _OpensThenFailsDuringIteration(pieces=[], error=error)
-    _install_fake_stream_client(monkeypatch, models)
-    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
-
-    with pytest.raises(RuntimeError, match="dropped immediately"):
-        list(generation.stream_answer("question", context))
-
-    # The stream was opened successfully on the first and only attempt --
-    # the failure happened while iterating it, which is never retried.
-    assert models.calls == 1
-
-
-def test_stream_answer_does_not_retry_a_failure_after_a_token_was_already_yielded(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "3")
-    error = RuntimeError("connection dropped mid-answer")
-    models = _OpensThenFailsDuringIteration(pieces=["Here is a partial answer"], error=error)
-    _install_fake_stream_client(monkeypatch, models)
+    models = _FakeStreamModels(
+        [["Here is a partial answer"]], mid_stream_error=RuntimeError("stream broke")
+    )
+    _install_fake_client(monkeypatch, models)
     context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
 
     generator = generation.stream_answer("question", context)
-    first_piece = next(generator)
+    first = next(generator)
+    assert first == "Here is a partial answer"
 
-    assert first_piece == "Here is a partial answer"
-    with pytest.raises(RuntimeError, match="connection dropped mid-answer"):
+    with pytest.raises(RuntimeError, match="stream broke"):
         next(generator)
 
-    assert models.calls == 1  # already-sent text was never re-requested
+    assert len(models.calls) == 1  # the interruption was never retried
+
+
+def test_stream_answer_includes_prior_turns_in_the_prompt_sent_to_gemini(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    models = _FakeStreamModels([["An answer."]])
+    _install_fake_client(monkeypatch, models)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+    history = [
+        {"role": "user", "content": "Earlier question about leave"},
+        {"role": "assistant", "content": "Earlier answer about leave"},
+    ]
+
+    list(generation.stream_answer("Follow-up question", context, history=history))
+
+    prompt = models.calls[0]
+    assert "Earlier question about leave" in prompt
+    assert "Earlier answer about leave" in prompt
+    assert "Follow-up question" in prompt

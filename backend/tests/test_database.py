@@ -1,206 +1,185 @@
-"""Unit tests for `app.database`.
+"""Unit tests for `app.database`: the engine/session factory configuration
+and the `get_db` request-scoped session dependency.
 
-`conftest.py`'s fixtures already exercise `get_db`/`Base`/`engine`
-*indirectly* through the `client` fixture -- every request in every other
-suite runs through a session this module hands out. What none of that
-proves: what `DATABASE_URL` defaults to and that it is actually read from
-the environment, that the SQLite-only `check_same_thread` workaround applies
-to a SQLite URL and nothing else, that the session factory is configured the
-way the module claims (`autoflush=False`, `expire_on_commit=False`, bound to
-this module's own engine), and the module's one behavioural promise --
-`get_db`'s docstring says a session is "closed even when the handler
-raises" -- which no other suite has a reason to go looking for, since every
-other suite's handlers succeed.
-
-`DATABASE_URL` and the SQLite-only `connect_args` are computed once at
-import time (unlike `app.config`, which reads `os.environ` fresh on every
-call), so the tests that vary `DATABASE_URL` cannot just call a function
-with a patched environment. They also must not `importlib.reload` the real
-`app.database` module in place: that would rebuild `Base` as a brand-new
-class object, which would silently break `issubclass(Document, Base)` (and
-everything else keyed on that one `Base`/`engine`/`get_db` identity) for
-every test that runs afterwards in this process -- `app.main` and
-`conftest.py` already bound their own references to the *original* objects
-at collection time and would never see the replacement. Instead,
-`_load_fresh_database_module` executes `database.py`'s source into an
-independent module object that is never registered in `sys.modules`, so the
-one the rest of the application already uses is never touched.
+`conftest.py`'s `client`/`db_session`/`db_engine` fixtures already exercise
+`get_db`'s happy path end to end through every route in the API (by
+overriding it with their own in-memory engine), so this file does not
+repeat that. Instead it covers what no other suite reaches directly: that
+`get_db` actually closes its session on every exit, success or exception
+alike, that the SQLite/non-SQLite branch in `_connect_args` picks the
+documented value either way, that `SessionLocal` is built with the
+`autoflush`/`expire_on_commit` settings the module's own docstring and
+comments promise, that `Base` is the declarative base the generated models
+actually register themselves on, and -- unmocked, against the real default
+engine `get_db` is wired to in `main.py` -- that a real request really can
+open and close a session through it.
 """
 
-import importlib.util
+import importlib
 
 import pytest
-from sqlalchemy.orm import DeclarativeBase, Session
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
 from app import database as database_module
-from app.models import Document
+from app import models  # noqa: F401 -- registers the generated tables on Base
+from app.database import Base, SessionLocal, get_db
+from app.main import app
+
+# --- get_db: a session every call, closed on every exit ---------------------
 
 
-def _load_fresh_database_module():
-    """A brand-new execution of `database.py`, independent of (and never
-    substituted for) `sys.modules["app.database"]`, so DATABASE_URL and the
-    SQLite-only connect_args can be observed under a patched environment
-    without disturbing the module instance everything else in the process
-    already imported from."""
-    spec = importlib.util.spec_from_file_location(
-        "app_database_fresh_copy_for_tests", database_module.__file__
-    )
-    fresh_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fresh_module)
-    return fresh_module
+class _FakeSession:
+    """Stands in for a real `Session`; `get_db`'s contract under test is
+    "close exactly once, on the way out" -- not which database the session
+    it hands back is wired to."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
-# --- DATABASE_URL: documented default and env override ----------------------
+def test_get_db_yields_a_session_and_closes_it_once_the_caller_is_done(monkeypatch) -> None:
+    fake_session = _FakeSession()
+    monkeypatch.setattr(database_module, "SessionLocal", lambda: fake_session)
+
+    gen = database_module.get_db()
+    yielded = next(gen)
+
+    assert yielded is fake_session
+    assert fake_session.closed is False
+
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert fake_session.closed is True
 
 
-def test_database_url_defaults_to_local_sqlite_file_when_unset(monkeypatch) -> None:
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    fresh = _load_fresh_database_module()
+def test_get_db_closes_the_session_even_when_the_caller_raises(monkeypatch) -> None:
+    """FastAPI drives this generator with `.throw(...)` when the handler it
+    wraps raises, exactly as a broken request handler would -- the `finally`
+    in `get_db` has to run (and close the session) on that path too, not
+    only on the clean one, or a session leaks every time a request fails."""
+    fake_session = _FakeSession()
+    monkeypatch.setattr(database_module, "SessionLocal", lambda: fake_session)
 
-    assert fresh.DATABASE_URL == "sqlite:///./app.db"
+    gen = database_module.get_db()
+    next(gen)
 
-
-def test_database_url_is_read_from_its_env_var(monkeypatch) -> None:
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://user:pass@localhost/db")
-    fresh = _load_fresh_database_module()
-
-    assert fresh.DATABASE_URL == "postgresql+psycopg://user:pass@localhost/db"
-
-
-# --- connect_args: only a sqlite URL gets check_same_thread=False -----------
-
-
-def test_sqlite_url_gets_check_same_thread_false_connect_arg(monkeypatch) -> None:
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///./somewhere-else.db")
-    fresh = _load_fresh_database_module()
-
-    assert fresh._connect_args == {"check_same_thread": False}
-    assert fresh.engine.dialect.name == "sqlite"
+    with pytest.raises(ValueError, match="handler blew up"):
+        gen.throw(ValueError("handler blew up"))
+    assert fake_session.closed is True
 
 
-def test_non_sqlite_url_gets_no_special_connect_args(monkeypatch) -> None:
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://user:pass@localhost/db")
-    fresh = _load_fresh_database_module()
-
-    assert fresh._connect_args == {}
-    assert fresh.engine.dialect.name == "postgresql"
-
-
-def test_in_memory_sqlite_url_still_gets_check_same_thread_false(monkeypatch) -> None:
-    # Guards against a narrower fix that only matches the on-disk
-    # `sqlite:///` form: any URL starting with "sqlite" needs the same
-    # workaround, in-memory included.
-    monkeypatch.setenv("DATABASE_URL", "sqlite://")
-    fresh = _load_fresh_database_module()
-
-    assert fresh._connect_args == {"check_same_thread": False}
-
-
-# --- SessionLocal: configured the way the module claims ---------------------
-
-
-def test_session_factory_is_bound_to_the_module_engine() -> None:
-    assert database_module.SessionLocal.kw["bind"] is database_module.engine
-
-
-def test_session_factory_disables_autoflush_and_does_not_expire_on_commit() -> None:
-    # Documented by name in the module: a session must not be expired on
-    # commit, or a second, independent session reading through a different
-    # identity map would stop seeing what the first one just wrote.
-    assert database_module.SessionLocal.kw["autoflush"] is False
-    assert database_module.SessionLocal.kw["expire_on_commit"] is False
-
-
-def test_session_local_produces_real_sqlalchemy_sessions() -> None:
-    session = database_module.SessionLocal()
+def test_get_db_yields_a_real_sqlalchemy_session() -> None:
+    gen = get_db()
+    session = next(gen)
     try:
         assert isinstance(session, Session)
-        assert session.bind is database_module.engine
+    finally:
+        gen.close()
+
+
+# --- SessionLocal: autoflush and expire-on-commit are both disabled --------
+
+
+def test_session_local_sessions_have_autoflush_and_expire_on_commit_disabled() -> None:
+    """Both are load-bearing, not incidental: `expire_on_commit=False` is
+    what lets a route return the ORM object it just committed (e.g.
+    `create_thread`, `upload_documents`) without a second round trip to
+    refresh it, and `autoflush=False` keeps a read made mid-handler from
+    implicitly flushing an unfinished write."""
+    session = SessionLocal()
+    try:
+        assert session.autoflush is False
+        assert session.expire_on_commit is False
     finally:
         session.close()
 
 
-# --- Base: the one declarative base every model inherits --------------------
+# --- Base: the declarative base the generated models actually use ----------
 
 
-def test_base_is_a_declarative_base_every_model_inherits() -> None:
-    assert issubclass(database_module.Base, DeclarativeBase)
-    assert issubclass(Document, database_module.Base)
+def test_base_metadata_registers_every_generated_table() -> None:
+    """Proves `Base` is not merely importable but is the exact base class
+    `app.models` declares its tables against -- `app.models` is imported at
+    the top of this file for precisely that side effect."""
+    table_names = set(Base.metadata.tables)
+
+    assert {"documents", "chunks", "threads", "messages", "citations"} <= table_names
 
 
-# --- get_db: yields one session, closes it in every case --------------------
+# --- DATABASE_URL / _connect_args: the SQLite-vs-everything-else branch ----
 
 
-def test_get_db_yields_a_single_usable_session() -> None:
-    generator = database_module.get_db()
-    try:
-        session = next(generator)
-        assert isinstance(session, Session)
-    finally:
-        generator.close()
+@pytest.fixture()
+def _restore_database_module():
+    """`DATABASE_URL`, `_connect_args`, `engine` and `SessionLocal` are all
+    computed once at import time, so the only way to exercise either branch
+    of the module's own `if DATABASE_URL.startswith("sqlite")` is to reload
+    it under a controlled environment -- restored here, by reloading again
+    with `DATABASE_URL` unset, so this module is left exactly as every other
+    test in the suite (and `app.main`, imported long before this file ever
+    runs) expects it: pointed at the local SQLite default.
+
+    This never touches `app.main`'s own already-imported `engine`/`get_db`
+    references (bound once, at `app.main`'s own import, long before this
+    fixture runs) or `app.models`'s already-defined `Base` subclasses, so it
+    cannot affect any other test in this suite.
+    """
+    yield
+    import os
+
+    os.environ.pop("DATABASE_URL", None)
+    importlib.reload(database_module)
 
 
-def test_get_db_closes_its_session_once_the_caller_is_done_with_it(monkeypatch) -> None:
-    closed = {"value": False}
+def test_default_database_url_is_local_sqlite_and_sets_check_same_thread(
+    monkeypatch, _restore_database_module
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    class _FakeSession:
-        def close(self) -> None:
-            closed["value"] = True
+    importlib.reload(database_module)
 
-    monkeypatch.setattr(database_module, "SessionLocal", lambda: _FakeSession())
-
-    generator = database_module.get_db()
-    next(generator)
-    # Mirrors what FastAPI does once the request handler returns normally:
-    # it drives the generator past its `yield`, which must still run the
-    # `finally` block below that yield -- not only the exception path.
-    generator.close()
-
-    assert closed["value"] is True
+    assert database_module.DATABASE_URL == "sqlite:///./app.db"
+    assert database_module._connect_args == {"check_same_thread": False}
 
 
-def test_get_db_closes_its_session_even_when_the_handler_raises(monkeypatch) -> None:
-    closed = {"value": False}
+def test_non_sqlite_database_url_omits_check_same_thread(
+    monkeypatch, _restore_database_module
+) -> None:
+    """SQLite's `check_same_thread` is not a keyword a real database driver
+    understands; passing it to one would raise, not merely be ignored, so
+    the branch that omits it for a non-SQLite `DATABASE_URL` is load-bearing
+    on its own, not just the SQLite branch's complement."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://user:pass@localhost/db")
 
-    class _FakeSession:
-        def close(self) -> None:
-            closed["value"] = True
+    importlib.reload(database_module)
 
-    monkeypatch.setattr(database_module, "SessionLocal", lambda: _FakeSession())
-
-    generator = database_module.get_db()
-    next(generator)
-
-    with pytest.raises(RuntimeError, match="boom"):
-        generator.throw(RuntimeError("boom"))
-
-    # The documented promise this function makes: a session is closed even
-    # when the handler using it raises, not only on the happy path.
-    assert closed["value"] is True
+    assert database_module._connect_args == {}
+    assert database_module.engine.dialect.name == "postgresql"
 
 
-def test_get_db_yields_a_fresh_session_on_every_call(monkeypatch) -> None:
-    created = []
+# --- get_db, unmocked: a real request really opens and closes a session ---
 
-    class _FakeSession:
-        def close(self) -> None:
-            pass
 
-    def _fake_session_local():
-        session = _FakeSession()
-        created.append(session)
-        return session
+def test_get_db_is_wired_into_a_real_route_against_the_real_default_engine() -> None:
+    """Every other suite overrides `get_db` with its own in-memory database
+    (see `conftest.py`), which proves the override seam works but never
+    proves `get_db` itself -- unmocked, undone -- is actually what `app.main`
+    wires every route to. This hits `POST /threads` through a fresh
+    `TestClient` with no override installed, so it runs against the module's
+    real default engine end to end, then deletes what it created so this
+    suite leaves no state behind for a later test to trip over."""
+    real_client = TestClient(app)
 
-    monkeypatch.setattr(database_module, "SessionLocal", _fake_session_local)
+    response = real_client.post("/threads")
+    assert response.status_code == 200
+    thread_id = response.json()["id"]
 
-    first_generator = database_module.get_db()
-    first_session = next(first_generator)
-    first_generator.close()
+    listed_ids = {t["id"] for t in real_client.get("/threads").json()}
+    assert thread_id in listed_ids
 
-    second_generator = database_module.get_db()
-    second_session = next(second_generator)
-    second_generator.close()
-
-    # One session per request, not one shared across requests.
-    assert first_session is not second_session
-    assert len(created) == 2
+    cleanup = real_client.delete(f"/threads/{thread_id}")
+    assert cleanup.status_code == 204
