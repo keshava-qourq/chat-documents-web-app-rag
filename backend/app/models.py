@@ -33,6 +33,7 @@ class EmbeddingVector(TypeDecorator):
 
     impl = JSON
     cache_ok = True
+    comparator_factory = Vector.comparator_factory
 
     def load_dialect_impl(self, dialect):
         if dialect.name == "postgresql":
