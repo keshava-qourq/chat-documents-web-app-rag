@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import App from "./App";
 
 describe("App shell", () => {
-  it("makes chat, documents and setup reachable from the nav", () => {
+  it("makes chat and documents reachable from the nav, with no setup tab", () => {
     render(
       <MemoryRouter initialEntries={["/chat"]}>
         <App />
@@ -15,7 +15,7 @@ describe("App shell", () => {
     const nav = screen.getByLabelText("Main navigation");
     expect(within(nav).getByText("Chat")).toBeInTheDocument();
     expect(within(nav).getByText("Documents")).toBeInTheDocument();
-    expect(within(nav).getByText("Setup & status")).toBeInTheDocument();
+    expect(within(nav).queryByText("Setup & status")).not.toBeInTheDocument();
   });
 
   it("keeps the chat panel mounted (not torn down) after a round trip to Documents", async () => {

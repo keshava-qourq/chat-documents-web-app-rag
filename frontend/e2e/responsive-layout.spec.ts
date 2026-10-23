@@ -73,11 +73,6 @@ test.describe("AC-059: narrow mobile layout reaches every area without horizonta
     );
     expect(overflowOnDocuments).toBe(false);
 
-    // Drawer closed itself on navigation; open it again to reach Setup.
-    await page.getByLabel("Open navigation menu").click();
-    await page.getByLabel("Main navigation").getByText("Setup & status", { exact: true }).click();
-    await expect(page.getByTestId("setup-panel")).toBeVisible();
-
     // Back to chat, confirming it is still reachable too.
     await page.getByLabel("Open navigation menu").click();
     await page.getByLabel("Main navigation").getByText("Chat", { exact: true }).click();

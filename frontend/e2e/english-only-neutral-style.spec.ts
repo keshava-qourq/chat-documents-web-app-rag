@@ -13,7 +13,6 @@ test.describe("AC-060: English-only, neutral styling, no language switcher", () 
     const nav = page.getByLabel("Main navigation");
     await expect(nav.getByText("Chat", { exact: true })).toBeVisible();
     await expect(nav.getByText("Documents", { exact: true })).toBeVisible();
-    await expect(nav.getByText("Setup & status", { exact: true })).toBeVisible();
 
     // Documents screen renders its English copy, not placeholder/translated text.
     await nav.getByText("Documents", { exact: true }).click();

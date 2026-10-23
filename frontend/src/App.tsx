@@ -4,12 +4,10 @@ import { Link, Navigate, useLocation } from "react-router-dom";
 import { Icons } from "@/lib/icons";
 import Chat from "@/screens/Chat";
 import Documents from "@/screens/Documents";
-import Setup from "@/screens/Setup";
 
 const NAV_ITEMS: Array<{ to: string; label: string }> = [
   { to: "/chat", label: "Chat" },
   { to: "/documents", label: "Documents" },
-  { to: "/setup", label: "Setup & status" },
 ];
 
 const KNOWN_PATHS = new Set(NAV_ITEMS.map((item) => item.to));
@@ -151,7 +149,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Desktop sidebar: chat, documents and setup all reachable, alongside whichever is open. */}
+      {/* Desktop sidebar: chat and documents both reachable, alongside whichever is open. */}
       {showDesktopSidebar && (
         <aside
           className="hidden w-56 shrink-0 border-r p-4 lg:block"
@@ -176,11 +174,6 @@ export default function App() {
         {visited.has("/documents") && (
           <div data-testid="documents-panel" hidden={path !== "/documents"}>
             <Documents />
-          </div>
-        )}
-        {visited.has("/setup") && (
-          <div data-testid="setup-panel" hidden={path !== "/setup"}>
-            <Setup />
           </div>
         )}
         {!KNOWN_PATHS.has(path) && <Navigate to="/chat" replace />}

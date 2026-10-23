@@ -421,21 +421,6 @@ export default function Screen() {
               <Icons.ChevronRight className="h-4 w-4" aria-hidden="true" />
             </span>
           </Button>
-          <Button
-            className="nb-focus"
-            onClick={() => navigate("setup")}
-            style={{
-              backgroundColor: "transparent",
-              color: muted,
-              border: "1px solid " + line,
-              borderRadius: brand.radius,
-            }}
-          >
-            <span className="inline-flex items-center gap-2">
-              <Icons.Settings className="h-4 w-4" aria-hidden="true" />
-              Setup &amp; status
-            </span>
-          </Button>
         </div>
       </header>
 
@@ -948,18 +933,7 @@ export default function Screen() {
               style={{ color: muted }}
               aria-hidden="true"
             />
-            <span>
-              The API key, document cap and limits are set by the operator —{" "}
-              <button
-                type="button"
-                className="nb-focus font-semibold underline underline-offset-2"
-                style={{ color: accentStrong, borderRadius: brand.radius }}
-                onClick={() => navigate("setup")}
-              >
-                see setup &amp; status
-              </button>
-              .
-            </span>
+            <span>The API key, document cap and limits are set by the operator.</span>
           </li>
         </ul>
       </section>
