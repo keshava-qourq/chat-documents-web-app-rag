@@ -131,7 +131,7 @@ function MessageBubble({
         data-role={message.role}
         className={cx(
           "min-w-0 max-w-[85%] overflow-hidden break-words rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
-          isUser ? "bg-[var(--brand-primary,#C2410C)] text-white" : "bg-slate-100 text-slate-800",
+          isUser ? "bg-[var(--brand-primary)] text-white" : "bg-slate-100 text-slate-800",
         )}
       >
         {isIncomplete ? (
