@@ -48,7 +48,7 @@ export function Button({
         "disabled:pointer-events-none disabled:opacity-50",
         BUTTON_VARIANTS[variant] ?? BUTTON_VARIANTS.primary,
         BUTTON_SIZES[size] ?? BUTTON_SIZES.md,
-        className
+        className,
       )}
       style={{ ...branded, ...style }}
     />
@@ -61,7 +61,7 @@ export function Card({ className, ...props }: Div) {
       {...props}
       className={cx(
         "rounded-[var(--brand-radius)] border border-slate-200 bg-white shadow-sm",
-        className
+        className,
       )}
     />
   );
@@ -190,7 +190,7 @@ export function Badge({
       className={cx(
         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
         BADGE_VARIANTS[variant] ?? BADGE_VARIANTS.default,
-        className
+        className,
       )}
       style={variant === "accent" ? { backgroundColor: "var(--brand-accent)", ...style } : style}
     />
@@ -223,7 +223,7 @@ export function TH({ className, ...props }: React.ThHTMLAttributes<HTMLTableCell
       {...props}
       className={cx(
         "px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500",
-        className
+        className,
       )}
     />
   );
@@ -253,7 +253,7 @@ export function Avatar({
       className={cx(
         "inline-flex h-8 w-8 items-center justify-center overflow-hidden rounded-full",
         "bg-slate-200 text-xs font-medium text-slate-600",
-        className
+        className,
       )}
     >
       {src ? <img src={src} alt={name} className="h-full w-full object-cover" /> : initials}
@@ -288,7 +288,7 @@ export function Tabs({
               "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors",
               selected
                 ? "border-[var(--brand-primary)] text-slate-900"
-                : "border-transparent text-slate-500 hover:text-slate-800"
+                : "border-transparent text-slate-500 hover:text-slate-800",
             )}
           >
             {tab.label}
@@ -314,7 +314,7 @@ export function Stat({
     <div
       className={cx(
         "rounded-[var(--brand-radius)] border border-slate-200 bg-white p-4",
-        className
+        className,
       )}
     >
       <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
@@ -345,7 +345,7 @@ export function Empty({
       className={cx(
         "flex flex-col items-center justify-center gap-2 rounded-[var(--brand-radius)]",
         "border border-dashed border-slate-300 px-6 py-12 text-center",
-        className
+        className,
       )}
     >
       <p className="text-sm font-medium text-slate-900">{title}</p>
