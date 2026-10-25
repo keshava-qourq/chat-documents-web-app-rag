@@ -73,7 +73,7 @@ function CitationItem({ citation }: { citation: CitationRecord }) {
         className="flex w-full items-center justify-between gap-2 rounded px-1 py-1 text-left font-semibold text-slate-700 hover:bg-slate-50"
         onClick={() => setExpanded((prev) => !prev)}
       >
-        <span>
+        <span className="break-words [overflow-wrap:anywhere]">
           {citation.document_name}
           {citation.source_location ? ` · ${citation.source_location}` : ""}
         </span>
@@ -84,7 +84,10 @@ function CitationItem({ citation }: { citation: CitationRecord }) {
         />
       </button>
       {expanded && (
-        <div id={panelId} className="px-1 pb-2 pt-0.5 text-slate-600">
+        <div
+          id={panelId}
+          className="break-words px-1 pb-2 pt-0.5 text-slate-600 [overflow-wrap:anywhere]"
+        >
           {available ? (
             <p>{citation.excerpt}</p>
           ) : (
@@ -262,9 +265,7 @@ export default function Screen() {
         // drop that bubble so the banner below is shown instead of an
         // answer, not alongside one left stuck mid-stream.
         setActiveThread((prev) =>
-          prev
-            ? { ...prev, messages: prev.messages.filter((m) => m.id !== streamingId) }
-            : prev,
+          prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== streamingId) } : prev,
         );
         setNoDocumentsIndexed(true);
         // The thread itself (and the user's question) was still created
@@ -459,41 +460,22 @@ export default function Screen() {
                       >
                         {t.title}
                       </button>
-                      {/*
-                        Rename/Delete are real, keyboard-operable links
-                        rather than <button>s here on purpose: a sibling
-                        <button> with accessible name "Rename {title}" /
-                        "Delete {title}" always contains the open-thread
-                        button's own name ("{title}") as a substring, which
-                        makes every role-based lookup for the thread's own
-                        title ambiguous (it also matches these two). A
-                        native <a> keeps the same aria-label, the same
-                        click handling, and the same keyboard operability
-                        (Enter activates it, focus is visible) while
-                        exposing a distinct "link" role instead of "button".
-                      */}
-                      <a
-                        href="#"
+                      <button
+                        type="button"
                         aria-label={`Rename ${t.title}`}
                         className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          startRename(t);
-                        }}
+                        onClick={() => startRename(t)}
                       >
                         <Edit size={14} aria-hidden="true" />
-                      </a>
-                      <a
-                        href="#"
+                      </button>
+                      <button
+                        type="button"
                         aria-label={`Delete ${t.title}`}
                         className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          setConfirmDeleteId(t.id);
-                        }}
+                        onClick={() => setConfirmDeleteId(t.id)}
                       >
                         <Trash size={14} aria-hidden="true" />
-                      </a>
+                      </button>
                     </div>
                   )}
                   {isRenaming && renameError && (
@@ -545,19 +527,31 @@ export default function Screen() {
             </div>
           ) : activeThread ? (
             <>
+              {/* min-w-0 keeps each row a true flex container that can shrink
+                  below its content's natural width, so the percentage
+                  max-width on the bubble below is what bounds it -- not an
+                  unbreakable token or URL forcing the row (and the chat
+                  column) wider (AC-073, AC-074). */}
               <ul className="space-y-6">
                 {activeThread.messages.map((m, index) => {
                   const sources = m.role === "assistant" ? dedupeCitations(m.citations ?? []) : [];
                   const isIncomplete = m.role === "assistant" && m.status === "incomplete";
+                  const isUser = m.role === "user";
                   return (
                     <li
                       key={m.id}
-                      className={m.role === "user" ? "flex justify-end" : "flex justify-start"}
+                      className={cx(
+                        "flex min-w-0 w-full",
+                        isUser ? "justify-end" : "justify-start",
+                      )}
                     >
                       <div
+                        data-testid="message-bubble"
+                        data-role={isUser ? "user" : "assistant"}
                         className={cx(
-                          "max-w-[85%] rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
-                          m.role === "user"
+                          "w-fit max-w-[85%] min-w-0 rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
+                          "break-words [overflow-wrap:anywhere]",
+                          isUser
                             ? "bg-[var(--brand-primary,#C2410C)] text-white"
                             : "bg-slate-100 text-slate-800",
                         )}
@@ -587,7 +581,7 @@ export default function Screen() {
                             </button>
                           </div>
                         ) : (
-                          <div className="prose prose-sm max-w-none">
+                          <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere]">
                             <ReactMarkdown>{m.content}</ReactMarkdown>
                           </div>
                         )}
@@ -701,7 +695,7 @@ export default function Screen() {
               className="mt-3 flex items-start gap-2 text-sm text-slate-600"
             >
               <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-              This is final: there is no undo, and no copy is kept.
+              This deletion is permanent: there is no undo, and no copy is kept.
             </p>
             <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
