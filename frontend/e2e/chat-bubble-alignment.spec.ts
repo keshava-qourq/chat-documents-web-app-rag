@@ -116,7 +116,11 @@ test.describe("AC-071: alternating turns align consistently to their own edge", 
   test("every user bubble's right edge and every assistant bubble's left edge match the chat column's boundary", async ({
     page,
   }) => {
-    const summary = { id: THREAD_ID, title: "Alignment check", last_active_at: new Date().toISOString() };
+    const summary = {
+      id: THREAD_ID,
+      title: "Alignment check",
+      last_active_at: new Date().toISOString(),
+    };
     const detail = threadDetail(THREAD_ID, "Alignment check", [
       userMessage("m1", "What is the client dinner limit?"),
       assistantMessage("m2", "The per-head limit for client dinners is €60."),
@@ -129,7 +133,9 @@ test.describe("AC-071: alternating turns align consistently to their own edge", 
 
     await page.goto("/chat");
     await page.getByRole("button", { name: "Alignment check" }).click();
-    await expect(page.getByText("Contractors may use any laptop meeting the security policy.")).toBeVisible();
+    await expect(
+      page.getByText("Contractors may use any laptop meeting the security policy."),
+    ).toBeVisible();
 
     await assertAllBubblesAligned(page);
   });
@@ -187,11 +193,6 @@ test.describe("AC-072: the assistant bubble's left edge is stable while streamin
     const pieces = words.map((w, i) => (i === 0 ? w : ` ${w}`));
     const fullAnswer = pieces.join("");
 
-    const summary = {
-      id: STREAM_THREAD_ID,
-      title: "New conversation",
-      last_active_at: new Date().toISOString(),
-    };
     const detail = threadDetail(STREAM_THREAD_ID, "Relocation allowance", [
       userMessage("m1", "What is the relocation allowance?"),
       assistantMessage(STREAM_MESSAGE_ID, fullAnswer),
@@ -209,7 +210,11 @@ test.describe("AC-072: the assistant bubble's left edge is stable while streamin
     await page.route("**/threads", async (route) => {
       const method = route.request().method();
       if (method === "GET") {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) });
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([]),
+        });
         return;
       }
       if (method === "POST") {
@@ -228,7 +233,11 @@ test.describe("AC-072: the assistant bubble's left edge is stable while streamin
     });
     await page.route(`**/threads/${STREAM_THREAD_ID}`, async (route) => {
       if (route.request().method() === "GET") {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(detail) });
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(detail),
+        });
         return;
       }
       await route.continue();
@@ -284,7 +293,11 @@ test.describe("AC-073: long multi-line content with citations and an unbroken lo
       },
     ];
 
-    const summary = { id: THREAD_ID, title: "Relocation policy", last_active_at: new Date().toISOString() };
+    const summary = {
+      id: THREAD_ID,
+      title: "Relocation policy",
+      last_active_at: new Date().toISOString(),
+    };
     const detail = threadDetail(THREAD_ID, "Relocation policy", [
       userMessage("m1", "Give me the full relocation policy breakdown."),
       assistantMessage("m2", longAnswer, { citations }),
@@ -324,9 +337,16 @@ test.describe("AC-074: mobile viewport keeps alignment and no horizontal scroll"
   test("at 375x812 there is no horizontal document scroll and both alignment rules still hold", async ({
     page,
   }) => {
-    const summary = { id: THREAD_ID, title: "Mobile alignment check", last_active_at: new Date().toISOString() };
+    const summary = {
+      id: THREAD_ID,
+      title: "Mobile alignment check",
+      last_active_at: new Date().toISOString(),
+    };
     const detail = threadDetail(THREAD_ID, "Mobile alignment check", [
-      userMessage("m1", "What is the per-head limit for client dinners, and does it vary by country office?"),
+      userMessage(
+        "m1",
+        "What is the per-head limit for client dinners, and does it vary by country office?",
+      ),
       assistantMessage(
         "m2",
         "The per-head limit for client dinners is €60 across all offices, with no country-specific variation.",
@@ -363,16 +383,26 @@ test.describe("AC-075: reopening a long thread keeps every bubble aligned, inclu
     const messages: unknown[] = [];
     topics.forEach((topic, i) => {
       messages.push(userMessage(`u${i}`, `What is the policy on ${topic}?`));
-      messages.push(assistantMessage(`a${i}`, `Here is the policy on ${topic}: see the handbook for details.`));
+      messages.push(
+        assistantMessage(`a${i}`, `Here is the policy on ${topic}: see the handbook for details.`),
+      );
     });
     // Replace the final assistant turn with an incomplete one (AC-037-style
     // history), so the fixture has 10+ messages and ends mid-answer.
-    messages[messages.length - 1] = assistantMessage("a-last", "Here is the policy on the relocation", {
-      status: "incomplete",
-    });
+    messages[messages.length - 1] = assistantMessage(
+      "a-last",
+      "Here is the policy on the relocation",
+      {
+        status: "incomplete",
+      },
+    );
     expect(messages.length).toBeGreaterThanOrEqual(10);
 
-    const summary = { id: THREAD_ID, title: "Long history", last_active_at: new Date().toISOString() };
+    const summary = {
+      id: THREAD_ID,
+      title: "Long history",
+      last_active_at: new Date().toISOString(),
+    };
     const detail = threadDetail(THREAD_ID, "Long history", messages);
     await mockThreadGet(page, THREAD_ID, summary, detail);
 
