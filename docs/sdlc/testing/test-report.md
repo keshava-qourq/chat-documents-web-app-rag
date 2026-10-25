@@ -72,6 +72,24 @@ Passed: 20 · Failed: 12 · Skipped: 0 · Flaky: 0 · Total: 32
 
 | Step | Status | Ticket | Finished |
 |---|---|---|---|
+| run_checks | succeeded | — | 2026-10-25 |
+
+### Sprint 6
+
+| Step | Status | Ticket | Finished |
+|---|---|---|---|
+| run_checks | succeeded | — | 2026-10-25 |
+
+### Sprint 6
+
+| Step | Status | Ticket | Finished |
+|---|---|---|---|
+| run_checks | succeeded | — | 2026-10-25 |
+
+### Sprint 6
+
+| Step | Status | Ticket | Finished |
+|---|---|---|---|
 | run_checks | succeeded | — | 2026-10-16 |
 
 ### Sprint 5
@@ -93,12 +111,6 @@ Passed: 20 · Failed: 12 · Skipped: 0 · Flaky: 0 · Total: 32
 | run_checks | failed | — | 2026-10-16 |
 
 ### Sprint 2
-
-| Step | Status | Ticket | Finished |
-|---|---|---|---|
-| run_checks | succeeded | — | 2026-10-16 |
-
-### Sprint 1
 
 | Step | Status | Ticket | Finished |
 |---|---|---|---|

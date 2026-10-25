@@ -7,7 +7,7 @@ Build a "chat with your documents" web app (RAG chatbot) that uses Google Gemini
 There is NO sign-up, NO login and NO user accounts: anyone who opens the app uses one
 shared workspace. All documents and conversations are visible to everyone using it. with history
 
-**Documentation version:** v10
+**Documentation version:** v11
 <!-- sdlc:auto:end overview -->
 
 ## Contents
@@ -17,7 +17,7 @@ shared workspace. All documents and conversations are visible to everyone using 
 |---|---|
 | [Requirements](requirements/README.md) | v3 approved |
 | [Architecture](architecture/README.md) | 7 entries |
-| [Development](development/README.md) | 9 entries |
+| [Development](development/README.md) | 10 entries |
 | [Testing](testing/README.md) | 1 entry |
 | [Deployment](deployment/README.md) | 1 entry |
 | [Maintenance](maintenance/README.md) | 1 entry |
@@ -25,15 +25,15 @@ shared workspace. All documents and conversations are visible to everyone using 
 | [API (OpenAPI)](architecture/api/openapi.yaml) | generated |
 | [Decisions (ADRs)](architecture/adr/README.md) | 4 decisions |
 | [Sprint plan](development/sprint-plan.md) | 6 sprints |
-| [Developer guide](development/developer-guide.md) | not generated yet |
-| [API reference](development/api-reference.md) | 0 routes |
+| [Developer guide](development/developer-guide.md) | generated |
+| [API reference](development/api-reference.md) | 11 routes |
 | [Test report](testing/test-report.md) | failed |
-| [Tests](testing/test-cases.md) | 0 tests |
+| [Tests](testing/test-cases.md) | 202 tests |
 | [Deployment guide](deployment/deployment-guide.md) | deployed |
 | [Runbook](deployment/runbook.md) | deployed |
 | [Release notes](deployment/release-notes.md) | 3 releases |
 | [Traceability matrix](traceability-matrix.md) | 24 requirements |
-| [Changelog](CHANGELOG.md) | 10 versions |
+| [Changelog](CHANGELOG.md) | 11 versions |
 <!-- sdlc:auto:end contents -->
 
 ## Open gaps
@@ -62,8 +62,17 @@ shared workspace. All documents and conversations are visible to everyone using 
 
 ### Development
 
-- No sprint dates provided.
-- No per-task completion breakdown provided; only story-level delivery recorded.
+- Input does not state which individual stories/tasks were assigned to which sprint, so sprint-to-story mapping above is inferred only from goal wording, not explicit assignment.
+- No development run record provided confirming these stories were actually built; only planning data is available.
+- These three items are not assigned to an epic in the input; unclear if they belong to an existing epic or are a separate workstream.
+- Discrepancy: run marked 'completed' while its one reported ticket (US-024) is 'failed' -- needs clarification on what 'completed' refers to.
+- No run/ticket data provided for US-001 through US-022; their implementation status is undocumented.
+- No date is given for this development run.
+- No date of delivery provided.
+- No description of which specific screens/components received the new tokens.
+- Reason for failure (which screens/elements regressed) not provided in input.
+- No remediation plan or re-test status recorded.
+- Unclear whether US-023's delivered change will be reverted, rolled back, or fixed given this QA failure.
 
 ### Testing
 

@@ -3,81 +3,110 @@
 > Maintained by QuorQ AI SDLC. Text between `sdlc:auto` markers is regenerated; anything outside them is yours and is kept.
 
 <!-- sdlc:auto:start narrative -->
-### DEV-PLAN-V1 · approved · source: plan:version-1
+### PLAN-V3 · approved · source: plan
 
-Approved development plan (v1): 6 sprints, capacity 20 each, covering foundation/upload, background indexing, document lifecycle & threads, core grounded chat, chat experience & protection, and launch readiness.
+Development plan approved at version 3, organized into six sprints taking the app from shell/upload through launch readiness.
 
-Sprint 1 - Foundation & Upload: open-access app shell, responsive two-area layout, multi-file document upload with validation. Sprint 2 - Background Indexing: server-side extraction, chunking, Gemini embedding pipeline with visible progress/failure and document cap. Sprint 3 - Document Lifecycle & Threads: safe deletion plus shared thread list/creation/auto-titling/rename/delete. Sprint 4 - Core Grounded Chat: retrieval-grounded Q&A strictly from documents with citations and not-found response. Sprint 5 - Chat Experience & Protection: expandable citation excerpts, token-by-token streaming, follow-up context handling, per-IP rate limiting. Sprint 6 - Launch Readiness: operator setup documentation, API key safety checks, billing-free interface confirmation.
+Sprint 1 - Foundation & Upload (capacity 20): open-access app shell, responsive two-area layout, multi-file upload with validation. Sprint 2 - Background Indexing (capacity 20): server-side extraction, chunking, Gemini embedding pipeline with visible progress/failure states and a document cap. Sprint 3 - Document Lifecycle & Threads (capacity 20): safe document deletion plus shared conversation thread list, creation, auto-titling, rename and delete. Sprint 4 - Core Grounded Chat (capacity 20): retrieval-grounded Q&A strictly from documents, with citations and a reliable not-found response. Sprint 5 - Chat Experience & Protection (capacity 20): expandable citation excerpts, token-by-token streaming, follow-up context handling, per-IP rate limiting. Sprint 6 - Launch Readiness (capacity 20): operator setup docs, API key safety checks, confirmation of a billing-free interface.
 
-**Related:** EPIC-001, EPIC-002, EPIC-003, EPIC-004, EPIC-005
+**Related:** US-001, US-002, US-003, US-004, US-005, US-006, US-007, US-008, US-009, US-010, US-011, US-012, US-013, US-014, US-015, US-016, US-017, US-018, US-019, US-020, US-021, US-022, US-023, US-024
 
-- ⚠ No sprint dates provided.
+- ⚠ Input does not state which individual stories/tasks were assigned to which sprint, so sprint-to-story mapping above is inferred only from goal wording, not explicit assignment.
 
-### DEV-SPRINT-1 · approved · source: plan:SPRINT-1
+### EPIC-001 · approved · source: plan:EPIC-001
 
-Sprint 1 - Foundation & Upload. Goal: open-access app shell, responsive two-area layout, multi-file document upload with validation. Capacity 20.
+Epic: Document upload and background indexing.
 
-Foundation sprint establishing the open-access shell, responsive two-area layout, and validated multi-file upload. Associated items: EPIC-001, US-001 (Upload documents from the browser, 8 pts, backend-agent) with tasks US-001-T1 build POST /documents endpoint, US-001-T2 integrate MinIO storage client, US-001-T3 build frontend upload component, US-001-T4 test batch upload with partial failure.
+US-001 Upload documents from the browser (8 pts, backend-agent): POST /documents endpoint, MinIO storage integration, frontend upload component, batch-upload partial-failure test. US-002 Extract, chunk and embed uploaded text in the background (8 pts, backend-agent): text extraction, overlapping chunking, Gemini embeddings with retry (integration-agent), background orchestration, pipeline failure/retry/cleanup test. US-003 See processing progress and failures (5 pts, backend-agent): detailed status endpoint, frontend status polling, UI display of processing/failure states.
 
-**Related:** DEV-PLAN-V1, US-001, US-018
+**Related:** US-001, US-002, US-003
 
-### DEV-SPRINT-2 · approved · source: plan:SPRINT-2
+- ⚠ No development run record provided confirming these stories were actually built; only planning data is available.
 
-Sprint 2 - Background Indexing. Goal: server-side extraction, chunking and Gemini embedding pipeline with visible progress/failure states and a document cap. Capacity 20.
+### EPIC-002 · approved · source: plan:EPIC-002
 
-Implements the background indexing pipeline. Associated items: US-002 (Extract, chunk and embed in background, 8 pts, backend-agent) with tasks US-002-T1 text extraction, US-002-T2 overlapping chunking, US-002-T3 Gemini embeddings with retry, US-002-T4 orchestrate background processing, US-002-T5 test pipeline failure/retry/cleanup. US-003 (See processing progress and failures, 5 pts, backend-agent) with tasks US-003-T1 detailed status endpoint, US-003-T2 frontend status polling, US-003-T3 display processing/failure states in UI.
+Epic: Shared document library.
 
-**Related:** DEV-PLAN-V1, US-002, US-003, US-006
+US-004 Browse the shared document library (5 pts, backend-agent): GET /documents endpoint, document library UI, shared-list visibility test. US-005 Delete a document and remove it from the index (5 pts, backend-agent): DELETE /documents/{id}, cancel in-flight indexing on delete, delete confirmation UI, test for deleted-document exclusion from chat. US-006 Enforce a cap on total stored documents (3 pts, backend-agent): document cap check, library-full error surfaced in UI, configurable cap with documented default (devops-agent).
 
-### DEV-SPRINT-3 · approved · source: plan:SPRINT-3
+**Related:** US-004, US-005, US-006
 
-Sprint 3 - Document Lifecycle & Threads. Goal: safe document deletion plus shared conversation thread list, creation, auto-titling, rename and delete. Capacity 20.
+- ⚠ No development run record provided confirming these stories were actually built; only planning data is available.
 
-Covers document library, deletion, cap, and thread management. Associated items: US-004 (Browse shared library, 5 pts, backend-agent) tasks US-004-T1 GET /documents, US-004-T2 document library UI, US-004-T3 test shared-list visibility. US-005 (Delete document, 5 pts, backend-agent) tasks US-005-T1 DELETE /documents/{id}, US-005-T2 cancel in-flight indexing on delete, US-005-T3 delete confirmation UI, US-005-T4 test deleted-document exclusion from chat. US-006 (Enforce document cap, 3 pts, backend-agent) tasks US-006-T1 cap check, US-006-T2 library-full error UI, US-006-T3 configurable cap with documented default (devops-agent). US-013 (See shared thread list, 3 pts, backend-agent) tasks US-013-T1 GET /threads, US-013-T2 sidebar thread list UI. US-014 (Start/open/continue any thread, 5 pts, backend-agent) tasks US-014-T1 POST /threads and GET /threads/{id}, US-014-T2 new-conversation and open-thread UI, US-014-T3 persist appended messages, US-014-T4 test cross-device persistence. US-015 (Auto-title from first question, 2 pts, backend-agent) tasks US-015-T1 generate auto-title, US-015-T2 truncate title display. US-016 (Rename or delete any thread, 3 pts, backend-agent) tasks US-016-T1 PATCH and DELETE /threads/{id}, US-016-T2 rename/delete UI controls, US-016-T3 reset chat view on active-thread delete.
+### EPIC-003 · approved · source: plan:EPIC-003
 
-**Related:** DEV-PLAN-V1, US-004, US-005, US-006, US-013, US-014, US-015, US-016
+Epic: Grounded chat with citations.
 
-### DEV-SPRINT-4 · approved · source: plan:SPRINT-4
+US-007 Ask a question answered only from the documents (8 pts, backend-agent): vector similarity retrieval, grounded prompt construction, Gemini generation call (integration-agent), handling of no-ready-documents case, test of Gemini error/timeout handling. US-008 Say when the answer is not in the documents (5 pts, backend-agent): relevance-threshold check, partial-coverage answering, grounding edge-case tests. US-009 See source citations on every answer (5 pts, backend-agent): source metadata attached to citations, citation de-duplication, citation list UI (frontend-agent). US-010 Expand a citation to read the retrieved excerpt (3 pts, frontend-agent): expandable citation component, handling of deleted-source citation case (backend-agent). US-011 Watch answers stream in token by token (5 pts, integration-agent): server-side streaming, persisting completed message on stream end, token-by-token frontend rendering, dropped-connection recovery test. US-012 Ask follow-up questions in context (5 pts, backend-agent): prior turns included in follow-up context, context-window truncation, reference-resolution/thread-isolation test.
 
-Sprint 4 - Core Grounded Chat. Goal: retrieval-grounded Q&A strictly from documents, with source citations and a reliable not-found response. Capacity 20.
+**Related:** US-007, US-008, US-009, US-010, US-011, US-012
 
-Implements core grounded chat. Associated items: US-007 (Ask a question answered only from documents, 8 pts, backend-agent) tasks US-007-T1 vector similarity retrieval, US-007-T2 grounded prompt construction, US-007-T3 Gemini generation call, US-007-T4 handle no-ready-documents case, US-007-T5 test Gemini error/timeout handling. US-008 (Say when answer not in documents, 5 pts, backend-agent) tasks US-008-T1 relevance-threshold check, US-008-T2 partial-coverage answering, US-008-T3 test grounding edge cases. US-009 (See source citations, 5 pts, backend-agent) tasks US-009-T1 attach source metadata to citations, US-009-T2 de-duplicate citations per answer, US-009-T3 citation list UI.
+- ⚠ No development run record provided confirming these stories were actually built; only planning data is available.
 
-**Related:** DEV-PLAN-V1, US-007, US-008, US-009
+### EPIC-004 · approved · source: plan:EPIC-004
 
-### DEV-SPRINT-5 · approved · source: plan:SPRINT-5
+Epic: Shared conversation history.
 
-Sprint 5 - Chat Experience & Protection. Goal: expandable citation excerpts, token-by-token streaming, follow-up context handling and per-IP rate limiting. Capacity 20.
+US-013 See the shared list of conversation threads (3 pts, backend-agent): GET /threads, sidebar thread list UI. US-014 Start, open and continue any thread (5 pts, backend-agent): POST /threads and GET /threads/{id}, new-conversation/open-thread UI, persisting appended messages to the shared thread, cross-device persistence test. US-015 Auto-title a thread from its first question (2 pts, backend-agent): auto-title generation, truncated title display in sidebar (frontend-agent). US-016 Rename or delete any thread (3 pts, backend-agent): PATCH/DELETE /threads/{id}, rename/delete UI controls, chat view reset on active-thread delete.
 
-Implements chat experience refinements and abuse protection. Associated items: US-010 (Expand citation to read excerpt, 3 pts, frontend-agent) tasks US-010-T1 expandable citation component, US-010-T2 handle deleted-source citation case. US-011 (Watch answers stream token by token, 5 pts, integration-agent) tasks US-011-T1 server-side streaming, US-011-T2 persist completed message on stream end, US-011-T3 token-by-token frontend rendering, US-011-T4 handle dropped-connection recovery. US-012 (Ask follow-up questions in context, 5 pts, backend-agent) tasks US-012-T1 include prior turns in follow-up context, US-012-T2 context-window truncation, US-012-T3 test reference resolution and thread isolation. US-019 (Rate limit chat and upload per IP, 5 pts, backend-agent) tasks US-019-T1 per-IP rate limiting middleware, US-019-T2 configurable limit settings, US-019-T3 429 handling in frontend, US-019-T4 test limit reset behaviour.
+**Related:** US-013, US-014, US-015, US-016
 
-**Related:** DEV-PLAN-V1, US-010, US-011, US-012, US-019
+- ⚠ No development run record provided confirming these stories were actually built; only planning data is available.
 
-### DEV-SPRINT-6 · approved · source: plan:SPRINT-6
+### EPIC-005 · approved · source: plan:EPIC-005
 
-Sprint 6 - Launch Readiness. Goal: operator setup documentation, API key safety checks and confirmation of a billing-free interface. Capacity 20.
+Epic: Open access, abuse protection and operation.
 
-Launch readiness sprint. Associated items: US-020 (Configure and run app with Gemini key, 5 pts, devops-agent) tasks US-020-T1 write setup notes, US-020-T2 add startup key validation, US-020-T3 verify key never reaches client, US-020-T4 run clean-environment walkthrough. US-021 (Run as free internal tool with no billing, 1 pt, frontend-agent) task US-021-T1 audit UI for billing elements. US-017 (Use app with no login/password, 1 pt, backend-agent) tasks US-017-T1 confirm no auth gating, US-017-T2 verify shared access across sessions.
+US-017 Use the app with no login or password (1 pt, backend-agent): confirmation of no auth gating, verification of shared access across sessions (qa-agent). US-018 Navigate a responsive two-area layout (5 pts, frontend-agent): two-area responsive shell, mobile breakpoint navigation, light/neutral English-only styling. US-019 Rate limit chat and upload per IP (5 pts, backend-agent): per-IP rate limiting middleware, configurable limit settings (devops-agent), 429 handling in frontend, limit-reset-behaviour test. US-020 Configure and run the app with a Gemini API key (5 pts, devops-agent): setup notes, startup key validation (backend-agent), verification the key never reaches the client (security-agent), clean-environment walkthrough (qa-agent). US-021 Run as a free internal tool with no billing (1 pt, frontend-agent): audit of UI for billing elements.
 
-**Related:** DEV-PLAN-V1, US-020, US-021, US-017
+**Related:** US-017, US-018, US-019, US-020, US-021
 
-### DEV-US-020 · approved · source: dev:US-020
+- ⚠ No development run record provided confirming these stories were actually built; only planning data is available.
 
-Ticket US-020 (Configure and run the app with a Gemini API key) delivered. Commit 70cc5a3c66b43d70d1a8757143a530d267402b33.
+### BACKLOG-UI-POLISH · approved · source: plan
 
-Status: delivered. Commit: 70cc5a3c66b43d70d1a8757143a530d267402b33. Covers setup notes, startup key validation, key-never-reaches-client verification, and clean-environment walkthrough.
+Later backlog items not grouped under any of the five original epics, covering chat bubble alignment and a blue/purple accent color rollout.
 
-**Related:** US-020, US-020-T1, US-020-T2, US-020-T3, US-020-T4, DEV-SPRINT-6
+US-022 Correct chat message bubble alignment (2 pts, frontend-agent). US-023 Apply blue/purple accent color tokens across the app (3 pts, frontend-agent). US-024 Verify no visual regressions from the new accent color palette (2 pts, qa-agent).
 
-- ⚠ No per-task completion breakdown provided; only story-level delivery recorded.
+**Related:** US-022, US-023, US-024
 
-### DEV-US-021 · approved · source: dev:US-021
+- ⚠ These three items are not assigned to an epic in the input; unclear if they belong to an existing epic or are a separate workstream.
 
-Ticket US-021 (Run as a free internal tool with no billing) delivered. Commit 70cc5a3c66b43d70d1a8757143a530d267402b33.
+### DEV-RUN-COVERAGE · approved · source: dev
 
-Status: delivered. Commit: 70cc5a3c66b43d70d1a8757143a530d267402b33. Covers UI audit for billing elements.
+_2026-10-25_
 
-**Related:** US-021, US-021-T1, DEV-SPRINT-6
+Development run status is reported as 'completed', but only two of the 24 planned stories (US-023, US-024) have recorded run/ticket outcomes in this input.
 
-- ⚠ No per-task completion breakdown provided; only story-level delivery recorded.
+The run-level status field says 'completed' even though the only ticket detail supplied for that run, US-024, is marked 'failed' with no commit -- this is a discrepancy between the overall run status and the individual ticket outcome. No ticket records were supplied for US-001 through US-022, so whether those stories (upload, indexing, library, grounded chat, citations, streaming, threads, rate limiting, API key setup, etc.) were implemented, are in progress, or have not been started cannot be determined from this input.
+
+**Related:** US-023, US-024
+
+- ⚠ Discrepancy: run marked 'completed' while its one reported ticket (US-024) is 'failed' -- needs clarification on what 'completed' refers to.
+- ⚠ No run/ticket data provided for US-001 through US-022; their implementation status is undocumented.
+- ⚠ No date is given for this development run.
+
+### DEV-TICKET-US-023 · approved · source: dev:TICKET-US-023
+
+Ticket to apply blue/purple accent color tokens across the app was delivered.
+
+Ticket US-023 'Apply blue/purple accent color tokens across the app' -- status: delivered. Commit: f5b7749472b19b456479b1d9bc0939ba89862ae9.
+
+**Related:** US-023
+
+- ⚠ No date of delivery provided.
+- ⚠ No description of which specific screens/components received the new tokens.
+
+### DEV-TICKET-US-024 · approved · source: dev:TICKET-US-024
+
+QA verification that the new accent color palette introduced no visual regressions did not pass.
+
+Ticket US-024 'Verify no visual regressions from the new accent color palette' -- status: failed. No commit recorded.
+
+**Related:** US-024, US-023
+
+- ⚠ Reason for failure (which screens/elements regressed) not provided in input.
+- ⚠ No remediation plan or re-test status recorded.
+- ⚠ Unclear whether US-023's delivered change will be reverted, rolled back, or fixed given this QA failure.
 <!-- sdlc:auto:end narrative -->
