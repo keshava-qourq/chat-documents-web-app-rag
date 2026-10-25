@@ -57,7 +57,8 @@ function dedupeCitations(citations: CitationRecord[]): CitationRecord[] {
  * (AC-033); each citation tracks its own expanded state independently.
  * When the source document has since been removed from the library, the
  * expanded area says so instead of showing an empty or erroring excerpt
- * (AC-034).
+ * (AC-034). Long file names/excerpts (including unbroken URLs) wrap and
+ * never widen the parent bubble (AC-073).
  */
 function CitationItem({ citation }: { citation: CitationRecord }) {
   const [expanded, setExpanded] = React.useState(false);
@@ -70,23 +71,23 @@ function CitationItem({ citation }: { citation: CitationRecord }) {
         type="button"
         aria-expanded={expanded}
         aria-controls={panelId}
-        className="flex w-full items-center justify-between gap-2 rounded px-1 py-1 text-left font-semibold text-slate-700 hover:bg-slate-50"
+        className="flex w-full items-start justify-between gap-2 rounded px-1 py-1 text-left font-semibold text-slate-700 hover:bg-slate-50"
         onClick={() => setExpanded((prev) => !prev)}
       >
-        <span>
+        <span className="min-w-0 break-words">
           {citation.document_name}
           {citation.source_location ? ` · ${citation.source_location}` : ""}
         </span>
         <ChevronDown
           size={12}
-          className={cx("shrink-0 transition-transform", expanded && "rotate-180")}
+          className={cx("mt-0.5 shrink-0 transition-transform", expanded && "rotate-180")}
           aria-hidden="true"
         />
       </button>
       {expanded && (
-        <div id={panelId} className="px-1 pb-2 pt-0.5 text-slate-600">
+        <div id={panelId} className="break-words px-1 pb-2 pt-0.5 text-slate-600">
           {available ? (
-            <p>{citation.excerpt}</p>
+            <p className="break-words">{citation.excerpt}</p>
           ) : (
             <p className="italic text-slate-500">
               This source document is no longer in the library.
@@ -94,6 +95,76 @@ function CitationItem({ citation }: { citation: CitationRecord }) {
           )}
         </div>
       )}
+    </li>
+  );
+}
+
+/**
+ * One message bubble: user turns right-aligned, assistant turns
+ * left-aligned, and that alignment holds whether the message arrived in a
+ * freshly loaded thread, mid-stream, or after a reload (AC-071, AC-072,
+ * AC-075). `data-testid`/`data-role` give tests a stable hook for asserting
+ * which side a given message rendered on, independent of styling.
+ */
+function MessageBubble({
+  message,
+  sources,
+  isIncomplete,
+  sending,
+  onAskAgain,
+}: {
+  message: MessageRecord;
+  sources: CitationRecord[];
+  isIncomplete: boolean;
+  sending: boolean;
+  onAskAgain: () => void;
+}) {
+  const isUser = message.role === "user";
+  return (
+    <li
+      data-testid="message-row"
+      data-role={message.role}
+      className={isUser ? "flex justify-end" : "flex justify-start"}
+    >
+      <div
+        data-testid="message-bubble"
+        data-role={message.role}
+        className={cx(
+          "min-w-0 max-w-[85%] overflow-hidden break-words rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
+          isUser ? "bg-[var(--brand-primary,#C2410C)] text-white" : "bg-slate-100 text-slate-800",
+        )}
+      >
+        {isIncomplete ? (
+          <div>
+            <p className="flex items-start gap-2 italic text-slate-600">
+              <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              This answer did not finish.
+            </p>
+            <button
+              type="button"
+              className="mt-2 font-semibold text-slate-700 underline underline-offset-2"
+              onClick={onAskAgain}
+              disabled={sending}
+            >
+              Ask again
+            </button>
+          </div>
+        ) : (
+          <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere]">
+            <ReactMarkdown>{message.content}</ReactMarkdown>
+          </div>
+        )}
+        {sources.length > 0 && (
+          <div className="mt-3 border-t border-slate-200 pt-2">
+            <p className="text-xs font-semibold text-slate-700">Sources</p>
+            <ul className="mt-1 space-y-1 text-xs text-slate-600">
+              {sources.map((c) => (
+                <CitationItem key={c.id} citation={c} />
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
     </li>
   );
 }
@@ -529,59 +600,19 @@ export default function Screen() {
                   const sources = m.role === "assistant" ? dedupeCitations(m.citations ?? []) : [];
                   const isIncomplete = m.role === "assistant" && m.status === "incomplete";
                   return (
-                    <li
+                    <MessageBubble
                       key={m.id}
-                      className={m.role === "user" ? "flex justify-end" : "flex justify-start"}
-                    >
-                      <div
-                        className={cx(
-                          "max-w-[85%] rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
-                          m.role === "user"
-                            ? "bg-[var(--brand-primary,#C2410C)] text-white"
-                            : "bg-slate-100 text-slate-800",
-                        )}
-                      >
-                        {isIncomplete ? (
-                          <div>
-                            <p className="flex items-start gap-2 italic text-slate-600">
-                              <AlertCircle
-                                size={16}
-                                className="mt-0.5 shrink-0"
-                                aria-hidden="true"
-                              />
-                              This answer did not finish.
-                            </p>
-                            <button
-                              type="button"
-                              className="mt-2 font-semibold text-slate-700 underline underline-offset-2"
-                              onClick={() => {
-                                const previousUser = [...activeThread.messages.slice(0, index)]
-                                  .reverse()
-                                  .find((candidate) => candidate.role === "user");
-                                if (previousUser) handleSend(previousUser.content);
-                              }}
-                              disabled={sending}
-                            >
-                              Ask again
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="prose prose-sm max-w-none">
-                            <ReactMarkdown>{m.content}</ReactMarkdown>
-                          </div>
-                        )}
-                        {sources.length > 0 && (
-                          <div className="mt-3 border-t border-slate-200 pt-2">
-                            <p className="text-xs font-semibold text-slate-700">Sources</p>
-                            <ul className="mt-1 space-y-1 text-xs text-slate-600">
-                              {sources.map((c) => (
-                                <CitationItem key={c.id} citation={c} />
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    </li>
+                      message={m}
+                      sources={sources}
+                      isIncomplete={isIncomplete}
+                      sending={sending}
+                      onAskAgain={() => {
+                        const previousUser = [...activeThread.messages.slice(0, index)]
+                          .reverse()
+                          .find((candidate) => candidate.role === "user");
+                        if (previousUser) handleSend(previousUser.content);
+                      }}
+                    />
                   );
                 })}
               </ul>
