@@ -1,0 +1,17 @@
+[run]
+# `app/tests/` is a second, self-contained test package left over from a
+# prior change whose `files_in_scope` was restricted to `backend/app/` (see
+# the module docstrings in that directory) -- `pytest.ini`'s `testpaths =
+# tests` deliberately does not collect it, since several of its cases do not
+# actually pass when run (verified: 6 failures out of 71 when run directly),
+# and the green baseline this repository hands to development depends on
+# that exclusion staying in place.
+#
+# `--cov=app` nonetheless walks the whole `app` package, `app/tests/`
+# included, so without this those never-collected files would be counted as
+# 0%-covered source and drag down the coverage percentage the platform
+# reports on the development dashboard for code nobody is meant to measure
+# in the first place. Omitted from coverage *measurement* only -- nothing
+# here changes what `pytest` collects or runs.
+omit =
+    app/tests/*

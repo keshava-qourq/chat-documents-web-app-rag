@@ -4,5 +4,15 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 *.db
 .env
+
+# Coverage artifacts. `pytest-cov` (declared in requirements.txt for the
+# sprint's unit-test check) writes these to the working directory when run
+# with `--cov`; they are regenerated on every run and never worth committing,
+# same reasoning as the `*.db` line above.
+.coverage
+.coverage.*
+coverage.json
+htmlcov/
