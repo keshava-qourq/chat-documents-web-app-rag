@@ -540,7 +540,10 @@ export default function Screen() {
                   return (
                     <li
                       key={m.id}
-                      className={cx("flex min-w-0 w-full", isUser ? "justify-end" : "justify-start")}
+                      className={cx(
+                        "flex min-w-0 w-full",
+                        isUser ? "justify-end" : "justify-start",
+                      )}
                     >
                       <div
                         data-testid="message-bubble"

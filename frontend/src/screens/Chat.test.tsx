@@ -762,9 +762,21 @@ describe("Chat screen — message bubble alignment (US-022-1)", () => {
       title: "Mixed thread",
       messages: [
         { id: "m-1", role: "user", content: "First question?", status: "complete", citations: [] },
-        { id: "m-2", role: "assistant", content: "First answer.", status: "complete", citations: [] },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "First answer.",
+          status: "complete",
+          citations: [],
+        },
         { id: "m-3", role: "user", content: "Second question?", status: "complete", citations: [] },
-        { id: "m-4", role: "assistant", content: "Second answer.", status: "complete", citations: [] },
+        {
+          id: "m-4",
+          role: "assistant",
+          content: "Second answer.",
+          status: "complete",
+          citations: [],
+        },
       ],
     });
 
@@ -878,8 +890,20 @@ describe("Chat screen — message bubble alignment (US-022-1)", () => {
       id: "t-1",
       title: "Narrow thread",
       messages: [
-        { id: "m-1", role: "user", content: "Question on mobile?", status: "complete", citations: [] },
-        { id: "m-2", role: "assistant", content: "Answer on mobile.", status: "complete", citations: [] },
+        {
+          id: "m-1",
+          role: "user",
+          content: "Question on mobile?",
+          status: "complete",
+          citations: [],
+        },
+        {
+          id: "m-2",
+          role: "assistant",
+          content: "Answer on mobile.",
+          status: "complete",
+          citations: [],
+        },
       ],
     });
 
