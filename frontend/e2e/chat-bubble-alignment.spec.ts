@@ -26,14 +26,12 @@ async function assertRowAlignment(row: Locator) {
 
   // The bubble never exceeds its row's horizontal bounds (no overflow).
   expect(bubbleBox.x).toBeGreaterThanOrEqual(rowBox.x - TOLERANCE_PX);
-  expect(bubbleBox.x + bubbleBox.width).toBeLessThanOrEqual(
-    rowBox.x + rowBox.width + TOLERANCE_PX,
-  );
+  expect(bubbleBox.x + bubbleBox.width).toBeLessThanOrEqual(rowBox.x + rowBox.width + TOLERANCE_PX);
 
   if (role === "user") {
-    expect(
-      Math.abs(bubbleBox.x + bubbleBox.width - (rowBox.x + rowBox.width)),
-    ).toBeLessThanOrEqual(TOLERANCE_PX);
+    expect(Math.abs(bubbleBox.x + bubbleBox.width - (rowBox.x + rowBox.width))).toBeLessThanOrEqual(
+      TOLERANCE_PX,
+    );
   } else {
     expect(Math.abs(bubbleBox.x - rowBox.x)).toBeLessThanOrEqual(TOLERANCE_PX);
   }
@@ -128,9 +126,7 @@ test.describe("AC-071: alternating user/assistant alignment, opposite sides", ()
     await expect(rows).toHaveCount(messages.length);
 
     // All rows share the same horizontal column bounds.
-    const boxes = await Promise.all(
-      (await rows.all()).map((row) => boxOf(row)),
-    );
+    const boxes = await Promise.all((await rows.all()).map((row) => boxOf(row)));
     const firstBox = boxes[0];
     for (const box of boxes) {
       expect(Math.abs(box.x - firstBox.x)).toBeLessThanOrEqual(TOLERANCE_PX);
@@ -144,7 +140,10 @@ test.describe("AC-071: alternating user/assistant alignment, opposite sides", ()
     }
 
     const userBubbleBox = await boxOf(
-      rows.filter({ has: page.locator('[data-role="user"]') }).first().locator('[data-testid="message-bubble"]'),
+      rows
+        .filter({ has: page.locator('[data-role="user"]') })
+        .first()
+        .locator('[data-testid="message-bubble"]'),
     );
     const assistantBubbleBox = await boxOf(
       rows
@@ -188,10 +187,9 @@ test.describe("AC-072: streaming assistant bubble stays left-aligned", () => {
     await page.getByRole("button", { name: /^send$/i }).click();
 
     const streamingRow = page.locator('[data-testid="message-row"][data-role="assistant"]');
-    await expect(streamingRow.locator('[data-testid="message-bubble"]')).toContainText(
-      pieces[0],
-      { timeout: 10_000 },
-    );
+    await expect(streamingRow.locator('[data-testid="message-bubble"]')).toContainText(pieces[0], {
+      timeout: 10_000,
+    });
     const earlyBox = await boxOf(streamingRow);
     const earlyBubbleBox = await boxOf(streamingRow.locator('[data-testid="message-bubble"]'));
     expect(Math.abs(earlyBubbleBox.x - earlyBox.x)).toBeLessThanOrEqual(TOLERANCE_PX);
@@ -220,7 +218,8 @@ test.describe("AC-073: long answer with citations stays within bounds and aligne
     const citations = [
       {
         id: "cit-1",
-        document_name: "https://intranet.example.com/policies/expenses-and-travel-handbook-2026.pdf",
+        document_name:
+          "https://intranet.example.com/policies/expenses-and-travel-handbook-2026.pdf",
         source_location: "p. 14",
         excerpt:
           "The per-head limit for client dinners is €60 inclusive of drinks and applies to all staff grades without exception.",
