@@ -7,7 +7,7 @@ Build a "chat with your documents" web app (RAG chatbot) that uses Google Gemini
 There is NO sign-up, NO login and NO user accounts: anyone who opens the app uses one
 shared workspace. All documents and conversations are visible to everyone using it. with history
 
-**Documentation version:** v9
+**Documentation version:** v10
 <!-- sdlc:auto:end overview -->
 
 ## Contents
@@ -15,7 +15,7 @@ shared workspace. All documents and conversations are visible to everyone using 
 <!-- sdlc:auto:start contents -->
 | Document | State |
 |---|---|
-| [Requirements](requirements/README.md) | v2 approved |
+| [Requirements](requirements/README.md) | v3 approved |
 | [Architecture](architecture/README.md) | 7 entries |
 | [Development](development/README.md) | 9 entries |
 | [Testing](testing/README.md) | 1 entry |
@@ -32,8 +32,8 @@ shared workspace. All documents and conversations are visible to everyone using 
 | [Deployment guide](deployment/deployment-guide.md) | deployed |
 | [Runbook](deployment/runbook.md) | deployed |
 | [Release notes](deployment/release-notes.md) | 3 releases |
-| [Traceability matrix](traceability-matrix.md) | 22 requirements |
-| [Changelog](CHANGELOG.md) | 9 versions |
+| [Traceability matrix](traceability-matrix.md) | 24 requirements |
+| [Changelog](CHANGELOG.md) | 10 versions |
 <!-- sdlc:auto:end contents -->
 
 ## Open gaps
@@ -41,22 +41,19 @@ shared workspace. All documents and conversations are visible to everyone using 
 <!-- sdlc:auto:start open-gaps -->
 ### Requirements
 
-- No queue/cache service exists; the mechanism by which the documents screen receives live processing-status updates (polling interval vs. push) is not specified -- relevant to US-003.
-- Whether document deletion should remain fully unrestricted or move to soft-delete/restricted access is an explicitly unresolved decision (see US-005/AC-017).
-- No fixed delivery deadline was provided; 'usable soon' is an assumption, not a commitment.
-- The number of retries and backoff policy before a document is marked 'failed' (AC-008) is not specified.
-- Mechanism for live progress updates on the documents screen (e.g. polling vs. push) is not specified, notable given no queue/cache service is in the stack.
-- AC-017 explicitly records unrestricted, unrecoverable, unattributed deletion as an open assumption pending a product decision on whether to restrict or allow recovery.
-- The documented default cap value (used when the operator sets none, per AC-021) is not specified in these requirements.
-- The retrieval parameters that define 'most relevant chunks' (e.g. top-k, similarity threshold) are not specified in the requirements.
-- The relevance threshold that decides 'sufficiently relevant' versus 'not found' (AC-026) is not quantified.
-- The specific context-window/truncation policy for including 'most recent relevant turns' (AC-040) is not defined numerically.
-- Which side (left/right) is designated for user vs. assistant messages is not specified.
-- AC-042 records fully shared, unfiltered thread visibility (no privacy) as an open assumption rather than a finalized decision.
-- The exact title-generation method and truncation length (AC-049) are not specified.
-- AC-053 records unrestricted, unrecoverable, unattributed thread deletion as an open assumption pending a product decision.
-- AC-057 records the full open-access risk (any finder of the URL has full read/write/delete access) as an accepted but still-open assumption.
-- Concrete rate-limit values (requests per window, window length) are not specified, only that they are configurable (AC-064).
+- No approval date or approver name is given for requirements version 3.
+- Exact chunk size/overlap configuration and the number of embedding retries before marking a document 'failed' are not specified.
+- Whether deletion should be restricted or made recoverable (soft-delete) was raised but not decided -- carried as an explicit open assumption (see US-005).
+- Gemini error/timeout handling for chat requests does not specify retry counts or timeout thresholds (see US-007).
+- No fixed delivery deadline was confirmed -- 'usable soon' is an assumption, not a committed date.
+- Specific chunk size/overlap values and the number of embedding retries before failure are not specified in this input.
+- AC-017 is explicitly flagged in the source as an open assumption pending a decision on restricted or recoverable (soft) deletion.
+- The numeric cap value and its documented default are not specified in this input.
+- Retry count and timeout threshold for Gemini chat errors are not specified.
+- The exact strategy for selecting 'most recent relevant turns' when truncating long-thread context is not fully specified.
+- AC-053's unrestricted, unlogged thread deletion is recorded as an open assumption of the open-access model, same as document deletion (US-005).
+- AC-057's fully open access to unknown internet visitors is recorded as an accepted-risk assumption rather than a resolved security control.
+- Specific rate-limit thresholds and window durations are not given, only that they must be configurable.
 
 ### Architecture
 

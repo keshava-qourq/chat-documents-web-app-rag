@@ -133,7 +133,7 @@ Capacity: 20 points · Committed: 18
 
 Operator setup documentation, API key safety checks and confirmation of a billing-free interface
 
-Capacity: 20 points · Committed: 8
+Capacity: 20 points · Committed: 13
 
 | Key | Type | Title | Points | Role | Depends on |
 |---|---|---|---|---|---|
@@ -145,6 +145,8 @@ Capacity: 20 points · Committed: 8
 | US-021 | Story | Run as a free internal tool with no billing | 1 | frontend-agent | — |
 | ↳ US-021-T1 | Task | Audit UI for billing elements | — | frontend-agent | — |
 | US-022 | Story | Correct chat message bubble alignment | 2 | frontend-agent | — |
+| US-023 | Story | Apply blue/purple accent color tokens across the app | 3 | frontend-agent | — |
+| US-024 | Story | Verify no visual regressions from the new accent color palette | 2 | qa-agent | — |
 
 ## Unscheduled
 

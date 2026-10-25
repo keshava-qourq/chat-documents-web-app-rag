@@ -5,7 +5,7 @@
 <!-- sdlc:auto:start summary -->
 0 tests · Passed 0 · Failed 0 · Skipped 0 · Not run 0
 
-Acceptance criteria covered: 0/75 · passing: 0/75
+Acceptance criteria covered: 0/83 · passing: 0/83
 <!-- sdlc:auto:end summary -->
 
 <!-- sdlc:auto:start tests -->
