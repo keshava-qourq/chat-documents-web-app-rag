@@ -738,3 +738,221 @@ describe("Chat screen — live threads API", () => {
     expect(await screen.findAllByText("And desktops?")).not.toHaveLength(0);
   });
 });
+
+describe("Chat screen — message bubble alignment (US-022-1)", () => {
+  beforeEach(() => {
+    mockedListThreads.mockReset();
+    mockedCreateThread.mockReset();
+    mockedGetThread.mockReset();
+    mockedRenameThread.mockReset();
+    mockedDeleteThread.mockReset();
+    mockedPostMessage.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("[AC-071] renders every user bubble right-aligned and every assistant bubble left-aligned, each with the stable test hook", async () => {
+    mockedListThreads.mockResolvedValue([
+      { id: "t-1", title: "Mixed thread", last_active_at: "2026-10-16T10:00:00Z" },
+    ]);
+    mockedGetThread.mockResolvedValue({
+      id: "t-1",
+      title: "Mixed thread",
+      messages: [
+        { id: "m-1", role: "user", content: "First question?", status: "complete", citations: [] },
+        { id: "m-2", role: "assistant", content: "First answer.", status: "complete", citations: [] },
+        { id: "m-3", role: "user", content: "Second question?", status: "complete", citations: [] },
+        { id: "m-4", role: "assistant", content: "Second answer.", status: "complete", citations: [] },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("Mixed thread");
+    await user.click(screen.getByRole("button", { name: "Mixed thread" }));
+    await screen.findByText("Second answer.");
+
+    const bubbles = screen.getAllByTestId("message-bubble");
+    expect(bubbles).toHaveLength(4);
+
+    const roles = bubbles.map((b) => b.getAttribute("data-role"));
+    expect(roles).toEqual(["user", "assistant", "user", "assistant"]);
+
+    bubbles.forEach((bubble) => {
+      const role = bubble.getAttribute("data-role");
+      const row = bubble.parentElement as HTMLElement;
+      if (role === "user") {
+        expect(row.className).toContain("justify-end");
+      } else {
+        expect(row.className).toContain("justify-start");
+      }
+    });
+  });
+
+  it("[AC-072] keeps the streaming assistant bubble's left alignment as it grows token by token", async () => {
+    mockedListThreads.mockResolvedValue([]);
+    mockedCreateThread.mockResolvedValue({
+      id: "t-new",
+      title: "New conversation",
+      created_at: "2026-10-16T10:00:00Z",
+    });
+
+    let onTokenCallback: ((text: string) => void) | undefined;
+    mockedPostMessage.mockImplementation((_id, _question, onToken) => {
+      onTokenCallback = onToken;
+      return new Promise(() => {});
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("No conversations yet");
+    const composer = screen.getByLabelText(/ask a question/i);
+    await user.type(composer, "Stream this?");
+    await user.click(screen.getByRole("button", { name: /^send/i }));
+
+    await waitFor(() => expect(onTokenCallback).toBeDefined());
+
+    const bubbleBefore = screen
+      .getAllByTestId("message-bubble")
+      .find((b) => b.getAttribute("data-role") === "assistant") as HTMLElement;
+    expect(bubbleBefore.parentElement?.className).toContain("justify-start");
+
+    onTokenCallback?.("Growing");
+    await screen.findByText("Growing");
+
+    const bubbleAfter = screen
+      .getAllByTestId("message-bubble")
+      .find((b) => b.getAttribute("data-role") === "assistant") as HTMLElement;
+    expect(bubbleAfter.parentElement?.className).toContain("justify-start");
+    expect(bubbleAfter.className).toContain("max-w-[85%]");
+  });
+
+  it("[AC-073] wraps long content and citation text inside the bubble without widening it, bounded to 85% max width", async () => {
+    const longWord = "a".repeat(300);
+    mockedListThreads.mockResolvedValue([
+      { id: "t-1", title: "Long content", last_active_at: "2026-10-16T10:00:00Z" },
+    ]);
+    mockedGetThread.mockResolvedValue({
+      id: "t-1",
+      title: "Long content",
+      messages: [
+        {
+          id: "m-1",
+          role: "assistant",
+          content: `Here is a very long unbroken token: ${longWord} and more text after it.`,
+          status: "complete",
+          citations: [
+            {
+              id: "c-1",
+              document_name: `https://example.com/${longWord}.pdf`,
+              source_location: "page 1",
+              excerpt: "excerpt",
+              document_available: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("Long content");
+    await user.click(screen.getByRole("button", { name: "Long content" }));
+
+    const bubble = await screen.findByTestId("message-bubble");
+    expect(bubble.className).toContain("max-w-[85%]");
+    expect(bubble.className).toContain("break-words");
+    expect(bubble.className).toContain("[overflow-wrap:anywhere]");
+  });
+
+  it("[AC-074] at a 375px viewport the bubbles remain readable with no fixed widths that force overflow", async () => {
+    mockedListThreads.mockResolvedValue([
+      { id: "t-1", title: "Narrow thread", last_active_at: "2026-10-16T10:00:00Z" },
+    ]);
+    mockedGetThread.mockResolvedValue({
+      id: "t-1",
+      title: "Narrow thread",
+      messages: [
+        { id: "m-1", role: "user", content: "Question on mobile?", status: "complete", citations: [] },
+        { id: "m-2", role: "assistant", content: "Answer on mobile.", status: "complete", citations: [] },
+      ],
+    });
+
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { writable: true, configurable: true, value: 375 });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("Narrow thread");
+    await user.click(screen.getByRole("button", { name: "Narrow thread" }));
+    await screen.findByText("Answer on mobile.");
+
+    const bubbles = screen.getAllByTestId("message-bubble");
+    bubbles.forEach((bubble) => {
+      expect(bubble.className).toContain("max-w-[85%]");
+      expect(bubble.className).toContain("min-w-0");
+    });
+
+    Object.defineProperty(window, "innerWidth", {
+      writable: true,
+      configurable: true,
+      value: originalInnerWidth,
+    });
+  });
+
+  it("[AC-075] applies the same alignment rules to a full reopened thread, including an incomplete historical message", async () => {
+    mockedListThreads.mockResolvedValue([
+      { id: "t-1", title: "Long history", last_active_at: "2026-10-16T10:00:00Z" },
+    ]);
+    const messages = Array.from({ length: 20 }, (_, i) => {
+      const isUser = i % 2 === 0;
+      return {
+        id: `m-${i}`,
+        role: isUser ? "user" : "assistant",
+        content: isUser ? `Question ${i}` : `Answer ${i}`,
+        status: "complete",
+        citations: [],
+      };
+    });
+    // Append one old incomplete assistant message at the end.
+    messages.push({
+      id: "m-incomplete",
+      role: "assistant",
+      content: "",
+      status: "incomplete",
+      citations: [],
+    });
+    mockedGetThread.mockResolvedValue({ id: "t-1", title: "Long history", messages });
+
+    const user = userEvent.setup();
+    renderScreen();
+
+    await screen.findByText("Long history");
+    await user.click(screen.getByRole("button", { name: "Long history" }));
+    await screen.findByText("This answer did not finish.");
+
+    const bubbles = screen.getAllByTestId("message-bubble");
+    expect(bubbles).toHaveLength(21);
+
+    bubbles.forEach((bubble) => {
+      const role = bubble.getAttribute("data-role");
+      const row = bubble.parentElement as HTMLElement;
+      expect(role === "user" || role === "assistant").toBe(true);
+      if (role === "user") {
+        expect(row.className).toContain("justify-end");
+      } else {
+        expect(row.className).toContain("justify-start");
+      }
+    });
+
+    const incompleteBubble = bubbles[bubbles.length - 1];
+    expect(incompleteBubble.getAttribute("data-role")).toBe("assistant");
+    expect(incompleteBubble.parentElement?.className).toContain("justify-start");
+  });
+});

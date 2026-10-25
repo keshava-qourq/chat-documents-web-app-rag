@@ -73,7 +73,7 @@ function CitationItem({ citation }: { citation: CitationRecord }) {
         className="flex w-full items-center justify-between gap-2 rounded px-1 py-1 text-left font-semibold text-slate-700 hover:bg-slate-50"
         onClick={() => setExpanded((prev) => !prev)}
       >
-        <span>
+        <span className="break-words [overflow-wrap:anywhere]">
           {citation.document_name}
           {citation.source_location ? ` · ${citation.source_location}` : ""}
         </span>
@@ -84,7 +84,10 @@ function CitationItem({ citation }: { citation: CitationRecord }) {
         />
       </button>
       {expanded && (
-        <div id={panelId} className="px-1 pb-2 pt-0.5 text-slate-600">
+        <div
+          id={panelId}
+          className="break-words px-1 pb-2 pt-0.5 text-slate-600 [overflow-wrap:anywhere]"
+        >
           {available ? (
             <p>{citation.excerpt}</p>
           ) : (
@@ -524,19 +527,28 @@ export default function Screen() {
             </div>
           ) : activeThread ? (
             <>
+              {/* min-w-0 keeps each row a true flex container that can shrink
+                  below its content's natural width, so the percentage
+                  max-width on the bubble below is what bounds it -- not an
+                  unbreakable token or URL forcing the row (and the chat
+                  column) wider (AC-073, AC-074). */}
               <ul className="space-y-6">
                 {activeThread.messages.map((m, index) => {
                   const sources = m.role === "assistant" ? dedupeCitations(m.citations ?? []) : [];
                   const isIncomplete = m.role === "assistant" && m.status === "incomplete";
+                  const isUser = m.role === "user";
                   return (
                     <li
                       key={m.id}
-                      className={m.role === "user" ? "flex justify-end" : "flex justify-start"}
+                      className={cx("flex min-w-0 w-full", isUser ? "justify-end" : "justify-start")}
                     >
                       <div
+                        data-testid="message-bubble"
+                        data-role={isUser ? "user" : "assistant"}
                         className={cx(
-                          "max-w-[85%] rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
-                          m.role === "user"
+                          "w-fit max-w-[85%] min-w-0 rounded-[var(--brand-radius,0.5rem)] px-4 py-3 text-sm",
+                          "break-words [overflow-wrap:anywhere]",
+                          isUser
                             ? "bg-[var(--brand-primary,#C2410C)] text-white"
                             : "bg-slate-100 text-slate-800",
                         )}
@@ -566,7 +578,7 @@ export default function Screen() {
                             </button>
                           </div>
                         ) : (
-                          <div className="prose prose-sm max-w-none">
+                          <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere]">
                             <ReactMarkdown>{m.content}</ReactMarkdown>
                           </div>
                         )}
