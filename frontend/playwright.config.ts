@@ -32,21 +32,21 @@ export default defineConfig({
   webServer: runAgainstDeployment
     ? undefined
     : [
-      {
-        // The generated backend defaults to a local SQLite database (see
-        // backend/app/database.py), so the API runs end to end with no database
-        // server to stand up.
-        command:
-          "cd ../backend && pip install -q -r requirements.txt && uvicorn app.main:app --host 127.0.0.1 --port 8000",
-        url: "http://127.0.0.1:8000/health",
-        reuseExistingServer: !process.env.CI,
-        timeout: 180_000,
-      },
-      {
-        command: "npm run build && npm run preview -- --port 4173 --host 127.0.0.1",
-        url: "http://127.0.0.1:4173",
-        reuseExistingServer: !process.env.CI,
-        timeout: 180_000,
-      },
-    ],
+        {
+          // The generated backend defaults to a local SQLite database (see
+          // backend/app/database.py), so the API runs end to end with no database
+          // server to stand up.
+          command:
+            "cd ../backend && pip install -q -r requirements.txt && uvicorn app.main:app --host 127.0.0.1 --port 8000",
+          url: "http://127.0.0.1:8000/health",
+          reuseExistingServer: !process.env.CI,
+          timeout: 180_000,
+        },
+        {
+          command: "npm run build && npm run preview -- --port 4173 --host 127.0.0.1",
+          url: "http://127.0.0.1:4173",
+          reuseExistingServer: !process.env.CI,
+          timeout: 180_000,
+        },
+      ],
 });

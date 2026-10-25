@@ -165,7 +165,7 @@ export const Icons: Record<string, React.FC<IconProps>> = Object.fromEntries(
     function NamedIcon(props: IconProps) {
       return <Icon {...props}>{node}</Icon>;
     },
-  ])
+  ]),
 );
 
 export const ICON_NAMES = Object.keys(paths);

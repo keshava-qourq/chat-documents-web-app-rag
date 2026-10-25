@@ -44,7 +44,9 @@ function isJsdomEnvironment(): boolean {
  */
 function useIsDesktop(): boolean | null {
   const supportsMatchMedia =
-    !isJsdomEnvironment() && typeof window !== "undefined" && typeof window.matchMedia === "function";
+    !isJsdomEnvironment() &&
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function";
 
   const [isDesktop, setIsDesktop] = useState<boolean | null>(() =>
     supportsMatchMedia ? window.matchMedia(DESKTOP_QUERY).matches : null,

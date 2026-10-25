@@ -17,7 +17,10 @@ export function toPath(route: string): string {
       .map((segment) =>
         segment.startsWith(":")
           ? segment
-          : segment.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+          : segment
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/^-|-$/g, ""),
       )
       .join("/")
   );
