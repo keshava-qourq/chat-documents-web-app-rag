@@ -1,6 +1,6 @@
 export const brand = {
-  primaryColor: "#C2410C",
-  accentColor: "#0E7490",
+  primaryColor: "#4285F4",
+  accentColor: "#9168C0",
   neutralColor: "#78716C",
   backgroundColor: "#FFFBF2",
   radius: "0.5rem",
