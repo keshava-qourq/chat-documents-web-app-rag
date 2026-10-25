@@ -262,9 +262,7 @@ export default function Screen() {
         // drop that bubble so the banner below is shown instead of an
         // answer, not alongside one left stuck mid-stream.
         setActiveThread((prev) =>
-          prev
-            ? { ...prev, messages: prev.messages.filter((m) => m.id !== streamingId) }
-            : prev,
+          prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== streamingId) } : prev,
         );
         setNoDocumentsIndexed(true);
         // The thread itself (and the user's question) was still created
@@ -459,41 +457,22 @@ export default function Screen() {
                       >
                         {t.title}
                       </button>
-                      {/*
-                        Rename/Delete are real, keyboard-operable links
-                        rather than <button>s here on purpose: a sibling
-                        <button> with accessible name "Rename {title}" /
-                        "Delete {title}" always contains the open-thread
-                        button's own name ("{title}") as a substring, which
-                        makes every role-based lookup for the thread's own
-                        title ambiguous (it also matches these two). A
-                        native <a> keeps the same aria-label, the same
-                        click handling, and the same keyboard operability
-                        (Enter activates it, focus is visible) while
-                        exposing a distinct "link" role instead of "button".
-                      */}
-                      <a
-                        href="#"
+                      <button
+                        type="button"
                         aria-label={`Rename ${t.title}`}
                         className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          startRename(t);
-                        }}
+                        onClick={() => startRename(t)}
                       >
                         <Edit size={14} aria-hidden="true" />
-                      </a>
-                      <a
-                        href="#"
+                      </button>
+                      <button
+                        type="button"
                         aria-label={`Delete ${t.title}`}
                         className="inline-flex shrink-0 items-center justify-center rounded p-1 text-slate-500 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          setConfirmDeleteId(t.id);
-                        }}
+                        onClick={() => setConfirmDeleteId(t.id)}
                       >
                         <Trash size={14} aria-hidden="true" />
-                      </a>
+                      </button>
                     </div>
                   )}
                   {isRenaming && renameError && (
@@ -701,7 +680,7 @@ export default function Screen() {
               className="mt-3 flex items-start gap-2 text-sm text-slate-600"
             >
               <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-              This is final: there is no undo, and no copy is kept.
+              This deletion is permanent: there is no undo, and no copy is kept.
             </p>
             <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
