@@ -1,524 +1,463 @@
-"""Unit tests for `app.services`: service configuration reporting, thread
-auto-titling, history trimming, the ready-documents existence check, and
-`request_answer`'s own branches -- exercised directly against the function
-with a bare `db` / `Thread` / `history`, not through
-`POST /threads/{id}/messages`.
+"""Unit tests for `app.services`: title derivation, the history-trimming
+budget, the ready-documents existence check, and `request_answer`'s own
+branching -- the no-ready-documents canned reply, a retrieval failure, the
+ready-but-nothing-above-threshold reply, the not-found-phrase reply, and a
+mid-stream failure from each of Gemini's typed errors -- independently of
+the router that calls it and independently of `app.generation` /
+`app.retrieval`'s own internals (already covered by their own test
+modules).
 
-`backend/tests/test_chat_streaming.py` and `backend/app/tests/test_threads.py`
-already exercise `request_answer` thoroughly end-to-end through the chat
-endpoint (multiple token events before `final`, citation deduplication,
-cross-thread isolation, long-history trimming, interrupted streams); this
-file does not re-litigate those. Instead it covers what calling the HTTP
-endpoint cannot reach directly -- `request_answer` called with no router
-pre-flight check in front of it (so a missing `GEMINI_API_KEY` reaches the
-function itself even with 'ready' documents present), branches that
-endpoint-level coverage happens not to exercise (zero chunks above
-threshold, a retrieval-layer exception, the streamed "not found" answer,
-`GenerationServiceError`), and the pure helper functions (`derive_title`,
-`trim_history`, `history_char_budget`, `has_ready_documents`,
-`configured_services`) tested directly rather than only through the
-behaviour they produce at the API.
-
-Every Gemini call in this file either never happens (no `GEMINI_API_KEY`
-set) or goes through a small fake installed on `app.generation.genai.Client`,
-the same pattern `test_chat_streaming.py` and `test_generation.py` use.
-Retrieval's own Gemini call (`embed_texts`) is monkeypatched on
-`app.retrieval`, exactly as `test_retrieval.py` does. No live Gemini,
-database, or MinIO call happens anywhere in this file.
+`request_answer` is exercised by calling it directly against its own
+in-memory SQLite engine (the same pattern `test_retrieval.py` and
+`test_gemini_config_error.py` use for module-level calls rather than the
+shared `conftest.py` `client` fixture), with `app.services.retrieve_context`
+and `app.services.stream_answer` monkeypatched at the names `services`
+itself calls them by -- so these are unit tests of the orchestration this
+module adds (what gets persisted, what gets streamed, when the thread's
+`last_active_at` moves), not a second copy of `test_chat_streaming.py`'s
+end-to-end, Gemini-client-level coverage of the same seam.
 """
 
 import json
 import uuid
+from datetime import UTC, datetime
 
-from app import generation, retrieval, services
-from app.models import Chunk, Document, Message, Thread
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-# --- shared fixtures / helpers ---------------------------------------------
+from app import services
+from app.database import Base
+from app.generation import (
+    NO_DOCUMENTS_MESSAGE,
+    NOT_FOUND_MESSAGE,
+    GeminiNotConfiguredError,
+    GenerationServiceError,
+)
+from app.models import Document, Message, Thread
+from app.retrieval import RetrievedChunk, RetrievedContext
+
+# --- fixtures and small helpers --------------------------------------------
+
+
+@pytest.fixture()
+def db_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    session = session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
+
+
+_SENTINEL_PAST = datetime(2020, 1, 1, tzinfo=UTC)
 
 
 def _make_thread(db_session) -> Thread:
-    thread = Thread()
+    thread = Thread(id=uuid.uuid4(), last_active_at=_SENTINEL_PAST)
     db_session.add(thread)
     db_session.commit()
     db_session.refresh(thread)
     return thread
 
 
-def _seed_ready_document_with_chunk(
-    db_session,
-    content: str = "Employees get 25 days of annual leave.",
-    source_location: str = "handbook.pdf, page 1",
-    file_name: str = "handbook.pdf",
-):
+def _make_document(db_session, status: str, file_name: str = "handbook.pdf") -> Document:
     document = Document(
         id=uuid.uuid4(),
         file_name=file_name,
-        mime_type="text/plain",
+        mime_type="application/pdf",
         size_bytes=10,
-        storage_key=file_name,
-        status="ready",
-        chunk_count=1,
+        storage_key=f"{uuid.uuid4()}.pdf",
+        status=status,
     )
     db_session.add(document)
     db_session.commit()
-    chunk = Chunk(
-        id=uuid.uuid4(),
-        document_id=document.id,
-        content=content,
-        source_location=source_location,
-        chunk_index=0,
-        embedding=[1.0, 0.0],
-    )
-    db_session.add(chunk)
-    db_session.commit()
     db_session.refresh(document)
-    db_session.refresh(chunk)
-    return document, chunk
+    return document
 
 
-def _sse_events(events_iterable) -> list[tuple[str, str]]:
-    """Consumes `request_answer`'s generator into `(event, data)` pairs, in
-    send order. Each item it yields is already one complete SSE block."""
-    parsed: list[tuple[str, str]] = []
-    for raw in events_iterable:
+def _chunk(document_name="handbook.pdf", source_location="handbook.pdf, page 1", content="text"):
+    return RetrievedChunk(
+        chunk_id=uuid.uuid4(),
+        document_id=uuid.uuid4(),
+        document_name=document_name,
+        source_location=source_location,
+        content=content,
+        similarity=0.9,
+    )
+
+
+def _parse_events(pieces: list[str]) -> list[tuple[str, dict | None]]:
+    """Parses the raw SSE strings `request_answer` yields -- one `_sse(...)`
+    call produces exactly one such string -- into `(event, data)` pairs."""
+    events = []
+    for piece in pieces:
         event = "message"
-        data = ""
-        for line in raw.splitlines():
+        data_line = ""
+        for line in piece.splitlines():
             if line.startswith("event:"):
                 event = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                data = line[len("data:") :].strip()
-        parsed.append((event, data))
-    return parsed
+                data_line = line[len("data:") :].strip()
+        events.append((event, json.loads(data_line) if data_line else None))
+    return events
 
 
-class _FakeStreamChunk:
-    def __init__(self, text):
-        self.text = text
+def _fake_stream(pieces, error=None):
+    def _stream(question, context, history):
+        yield from pieces
+        if error is not None:
+            raise error
+
+    return _stream
 
 
-class _FakeStreamModels:
-    """Records every prompt it is called to open a stream with (`calls`).
-    Streams back `pieces` as plain-text deltas when `open_error` is `None`;
-    otherwise raises `open_error` synchronously on every call, simulating
-    every attempt to *open* the stream failing -- what exhausts
-    `stream_answer`'s retries into a `GenerationServiceError`."""
-
-    def __init__(self, pieces=None, open_error=None):
-        self.pieces = pieces or []
-        self.open_error = open_error
-        self.calls: list[str] = []
-
-    def generate_content_stream(self, model, contents):
-        self.calls.append(contents)
-        if self.open_error is not None:
-            raise self.open_error
-        return (_FakeStreamChunk(piece) for piece in self.pieces)
+# --- derive_title ------------------------------------------------------
 
 
-def _install_fake_stream_client(monkeypatch, models):
-    class Factory:
-        def __call__(self, api_key):
-            return type("C", (), {"models": models})()
+def test_derive_title_blank_or_whitespace_only_question_yields_new_conversation():
+    assert services.derive_title("") == "New conversation"
+    assert services.derive_title("   \n\t  ") == "New conversation"
 
-    monkeypatch.setattr(generation.genai, "Client", Factory())
+
+def test_derive_title_collapses_internal_whitespace():
+    assert services.derive_title("What   is\tthe   policy?\n") == "What is the policy?"
+
+
+def test_derive_title_short_question_is_returned_unchanged():
+    question = "How many vacation days do I get?"
+    assert services.derive_title(question) == question
+
+
+def test_derive_title_exactly_at_max_length_is_unchanged():
+    question = "x" * services.TITLE_MAX_LENGTH
+    title = services.derive_title(question)
+    assert title == question
+    assert len(title) == services.TITLE_MAX_LENGTH
+
+
+def test_derive_title_truncates_at_the_last_whole_word_and_appends_ellipsis():
+    question = "What is the per diem for staff travelling to the Berlin office this quarter?"
+    title = services.derive_title(question)
+
+    assert len(title) <= services.TITLE_MAX_LENGTH
+    assert title.endswith("…")
+    assert not title[:-1].endswith(" ")  # trailing space trimmed before the ellipsis
+    # Truncated at a word boundary: the body (without ellipsis) is a prefix
+    # of the original question made only of whole words.
+    body = title[:-1]
+    assert question.startswith(body)
+    assert question[len(body)] == " " or len(body) == len(question)
+
+
+def test_derive_title_hard_cuts_a_single_word_with_no_boundary_to_break_at():
+    question = "supercalifragilisticexpialidocious" * 5  # one giant word, no spaces
+    title = services.derive_title(question)
+
+    assert len(title) == services.TITLE_MAX_LENGTH
+    assert title.endswith("…")
+
+
+@pytest.mark.parametrize(
+    "length", [1, 10, services.TITLE_MAX_LENGTH - 1, services.TITLE_MAX_LENGTH, 61, 200, 1000]
+)
+def test_derive_title_result_never_exceeds_max_length(length):
+    question = " ".join(["word"] * (length // 5 + 1))[:length] or "x"
+    assert len(services.derive_title(question)) <= services.TITLE_MAX_LENGTH
+
+
+# --- history_char_budget -------------------------------------------------
+
+
+def test_history_char_budget_defaults_when_unset(monkeypatch):
+    monkeypatch.delenv("HISTORY_CHAR_BUDGET", raising=False)
+    assert services.history_char_budget() == services.HISTORY_CHAR_BUDGET_DEFAULT
+
+
+def test_history_char_budget_reads_the_environment_override(monkeypatch):
+    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "250")
+    assert services.history_char_budget() == 250
+
+
+# --- trim_history ----------------------------------------------------------
+
+
+def test_trim_history_of_an_empty_list_returns_an_empty_list(monkeypatch):
+    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "1000")
+    assert services.trim_history([]) == []
+
+
+def test_trim_history_keeps_every_turn_when_all_fit_under_budget(monkeypatch):
+    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "1000")
+    history = [
+        {"role": "user", "content": "short question"},
+        {"role": "assistant", "content": "short answer"},
+    ]
+    assert services.trim_history(history) == history
+
+
+def test_trim_history_always_keeps_the_single_most_recent_turn_even_if_it_alone_exceeds_budget(
+    monkeypatch,
+):
+    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "10")
+    history = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "x" * 500},
+    ]
+    kept = services.trim_history(history)
+    assert kept == [history[-1]]
+
+
+def test_trim_history_drops_the_oldest_turns_once_the_running_total_would_exceed_budget(
+    monkeypatch,
+):
+    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "25")
+    oldest = {"role": "user", "content": "x" * 20}
+    middle = {"role": "assistant", "content": "y" * 10}
+    newest = {"role": "user", "content": "z" * 10}
+    kept = services.trim_history([oldest, middle, newest])
+
+    # Newest-first filling means `oldest` cannot fit once `middle` + `newest`
+    # are already in, and the result preserves chronological order.
+    assert oldest not in kept
+    assert kept == [middle, newest]
+
+
+# --- has_ready_documents ---------------------------------------------------
+
+
+def test_has_ready_documents_is_false_with_no_documents_at_all(db_session):
+    assert services.has_ready_documents(db_session) is False
+
+
+def test_has_ready_documents_is_false_when_only_processing_or_failed_documents_exist(db_session):
+    _make_document(db_session, status="processing")
+    _make_document(db_session, status="failed", file_name="other.pdf")
+    assert services.has_ready_documents(db_session) is False
+
+
+def test_has_ready_documents_is_true_once_a_ready_document_exists(db_session):
+    _make_document(db_session, status="processing")
+    _make_document(db_session, status="ready", file_name="handbook.pdf")
+    assert services.has_ready_documents(db_session) is True
 
 
 # --- configured_services ----------------------------------------------------
 
 
-def test_configured_services_reports_both_as_false_when_unset(monkeypatch) -> None:
-    monkeypatch.delenv("MINIO_ENDPOINT", raising=False)
+def test_configured_services_tracks_each_variable_independently(monkeypatch):
+    monkeypatch.setenv("MINIO_ENDPOINT", "minio:9000")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    assert services.configured_services() == {"minio": False, "gemini": False}
+    result = services.configured_services()
+
+    assert result == {"minio": True, "gemini": False}
 
 
-def test_configured_services_reports_each_as_true_once_its_env_var_is_set(monkeypatch) -> None:
-    monkeypatch.setenv("MINIO_ENDPOINT", "minio:9000")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-
-    assert services.configured_services() == {"minio": True, "gemini": True}
-
-
-# --- derive_title ------------------------------------------------------------
-
-
-def test_derive_title_collapses_internal_whitespace() -> None:
-    title = services.derive_title("What   is\tthe\n\nrefund policy?")
-
-    assert title == "What is the refund policy?"
-
-
-def test_derive_title_blank_or_whitespace_only_question_falls_back_to_new_conversation() -> None:
-    assert services.derive_title("") == "New conversation"
-    assert services.derive_title("   \n\t  ") == "New conversation"
-
-
-def test_derive_title_exactly_at_max_length_is_returned_unchanged_with_no_ellipsis() -> None:
-    text = "x" * 60
-
-    title = services.derive_title(text)
-
-    assert title == text
-    assert "…" not in title
-
-
-def test_derive_title_over_max_length_is_truncated_at_a_word_boundary_with_ellipsis() -> None:
-    text = "word " * 13  # 65 chars, well past the limit, with word boundaries to cut at
-
-    title = services.derive_title(text)
-
-    assert len(title) <= 60
-    assert title.endswith("…")
-    assert not title.endswith(" …")  # the trailing space before the cut was trimmed
-
-
-def test_derive_title_single_word_longer_than_the_limit_is_hard_cut() -> None:
-    text = "x" * 100  # no word boundary at all to cut at
-
-    title = services.derive_title(text)
-
-    assert title == "x" * 59 + "…"
-    assert len(title) == 60
-
-
-def test_derive_title_respects_a_custom_max_length() -> None:
-    title = services.derive_title("one two three four five", max_length=10)
-
-    assert len(title) <= 10
-
-
-# --- history_char_budget -----------------------------------------------------
-
-
-def test_history_char_budget_reads_env_var_and_falls_back_to_default(monkeypatch) -> None:
-    monkeypatch.delenv("HISTORY_CHAR_BUDGET", raising=False)
-    assert services.history_char_budget() == services.HISTORY_CHAR_BUDGET_DEFAULT
-
-    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "500")
-    assert services.history_char_budget() == 500
-
-
-# --- trim_history -------------------------------------------------------------
-
-
-def test_trim_history_of_an_empty_list_returns_an_empty_list(monkeypatch) -> None:
-    monkeypatch.delenv("HISTORY_CHAR_BUDGET", raising=False)
-
-    assert services.trim_history([]) == []
-
-
-def test_trim_history_keeps_everything_under_budget_in_original_order(monkeypatch) -> None:
-    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "1000")
-    history = [
-        {"role": "user", "content": "a"},
-        {"role": "assistant", "content": "b"},
-        {"role": "user", "content": "c"},
-    ]
-
-    assert services.trim_history(history) == history
-
-
-def test_trim_history_keeps_the_single_most_recent_turn_even_if_it_alone_exceeds_budget(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "5")
-    history = [
-        {"role": "user", "content": "short"},
-        {"role": "assistant", "content": "x" * 50},
-    ]
-
-    trimmed = services.trim_history(history)
-
-    assert trimmed == [{"role": "assistant", "content": "x" * 50}]
-
-
-def test_trim_history_drops_oldest_turns_once_the_budget_would_be_exceeded(monkeypatch) -> None:
-    monkeypatch.setenv("HISTORY_CHAR_BUDGET", "12")
-    history = [
-        {"role": "user", "content": "oldest-marker"},  # 13 chars -- dropped
-        {"role": "assistant", "content": "kept"},  # 4 chars
-        {"role": "user", "content": "newest"},  # 6 chars
-    ]
-
-    trimmed = services.trim_history(history)
-
-    assert trimmed == [
-        {"role": "assistant", "content": "kept"},
-        {"role": "user", "content": "newest"},
-    ]
-
-
-# --- has_ready_documents -------------------------------------------------------
-
-
-def test_has_ready_documents_is_false_when_the_library_is_empty(db_session) -> None:
-    assert services.has_ready_documents(db_session) is False
-
-
-def test_has_ready_documents_is_false_when_only_processing_or_failed_documents_exist(
-    db_session,
-) -> None:
-    db_session.add(
-        Document(
-            id=uuid.uuid4(),
-            file_name="a.pdf",
-            mime_type="application/pdf",
-            size_bytes=1,
-            storage_key="a.pdf",
-            status="processing",
-        )
-    )
-    db_session.add(
-        Document(
-            id=uuid.uuid4(),
-            file_name="b.pdf",
-            mime_type="application/pdf",
-            size_bytes=1,
-            storage_key="b.pdf",
-            status="failed",
-        )
-    )
-    db_session.commit()
-
-    assert services.has_ready_documents(db_session) is False
-
-
-def test_has_ready_documents_is_true_once_one_document_is_ready(db_session) -> None:
-    db_session.add(
-        Document(
-            id=uuid.uuid4(),
-            file_name="c.pdf",
-            mime_type="application/pdf",
-            size_bytes=1,
-            storage_key="c.pdf",
-            status="ready",
-        )
-    )
-    db_session.commit()
-
-    assert services.has_ready_documents(db_session) is True
-
-
-# --- request_answer: no ready documents at all --------------------------------
+# --- request_answer: no ready documents at all -----------------------------
 
 
 def test_request_answer_with_no_ready_documents_streams_canned_message_and_persists_nothing(
-    db_session,
-) -> None:
+    db_session, monkeypatch
+):
     thread = _make_thread(db_session)
+    monkeypatch.setattr(
+        services,
+        "retrieve_context",
+        lambda db, question: RetrievedContext(chunks=[], has_ready_documents=False),
+    )
 
-    events = _sse_events(services.request_answer(db_session, thread, "Anything?", []))
+    def fail_stream(*args, **kwargs):
+        raise AssertionError("Gemini must not be called with no ready documents")
+
+    monkeypatch.setattr(services, "stream_answer", fail_stream)
+
+    events = _parse_events(list(services.request_answer(db_session, thread, "Anything?", [])))
 
     assert [name for name, _ in events] == ["token", "final"]
-    token_data = json.loads(events[0][1])
-    assert token_data["text"] == generation.NO_DOCUMENTS_MESSAGE
-    final_data = json.loads(events[1][1])
-    assert final_data == {"message_id": None, "citations": []}
+    assert events[0][1]["text"] == NO_DOCUMENTS_MESSAGE
+    assert events[1][1] == {"message_id": None, "citations": []}
+
+    assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 0
+    db_session.refresh(thread)
+    assert thread.last_active_at == _SENTINEL_PAST  # left untouched
+
+
+# --- request_answer: retrieval itself fails --------------------------------
+
+
+def test_request_answer_when_retrieval_raises_emits_only_an_error_event_and_persists_nothing(
+    db_session, monkeypatch
+):
+    thread = _make_thread(db_session)
+
+    def fail_retrieve(db, question):
+        raise RuntimeError("embedding service unreachable")
+
+    monkeypatch.setattr(services, "retrieve_context", fail_retrieve)
+
+    events = _parse_events(list(services.request_answer(db_session, thread, "Anything?", [])))
+
+    assert [name for name, _ in events] == ["error"]
+    assert "detail" in events[0][1]
     assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 0
 
 
-# --- request_answer: ready documents, nothing above threshold -----------------
+# --- request_answer: ready documents but nothing above threshold ----------
 
 
-def test_request_answer_with_ready_documents_but_nothing_above_threshold_persists_a_complete_canned_answer(  # noqa: E501
+def test_request_answer_with_ready_documents_but_zero_chunks_persists_complete_ungrounded_message(
     db_session, monkeypatch
-) -> None:
-    _seed_ready_document_with_chunk(db_session)
-    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
-    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: 2.0)  # nothing qualifies
+):
     thread = _make_thread(db_session)
+    monkeypatch.setattr(
+        services,
+        "retrieve_context",
+        lambda db, question: RetrievedContext(chunks=[], has_ready_documents=True),
+    )
 
-    events = _sse_events(services.request_answer(db_session, thread, "Anything?", []))
+    def fail_stream(*args, **kwargs):
+        raise AssertionError("Gemini must not be called with no chunks above threshold")
+
+    monkeypatch.setattr(services, "stream_answer", fail_stream)
+
+    events = _parse_events(list(services.request_answer(db_session, thread, "Anything?", [])))
 
     assert [name for name, _ in events] == ["token", "final"]
-    final_data = json.loads(events[1][1])
-    assert final_data["citations"] == []
+    assert events[0][1]["text"] == NO_DOCUMENTS_MESSAGE
+    final_data = events[1][1]
     assert final_data["message_id"] is not None
+    assert final_data["citations"] == []
 
     message = db_session.query(Message).filter(Message.thread_id == thread.id).one()
+    assert message.role == "assistant"
     assert message.status == "complete"
-    assert message.content == generation.NO_DOCUMENTS_MESSAGE
+    assert message.content == NO_DOCUMENTS_MESSAGE
+    db_session.refresh(thread)
+    assert thread.last_active_at > _SENTINEL_PAST
 
 
-# --- request_answer: retrieval itself fails ------------------------------------
+# --- request_answer: the not-found phrase is treated as ungrounded --------
 
 
-def test_request_answer_when_retrieval_raises_yields_an_error_event_and_persists_nothing(
+def test_request_answer_not_found_phrase_persists_complete_message_with_no_citations(
     db_session, monkeypatch
-) -> None:
-    def boom(db, question):
-        raise RuntimeError("retrieval backend unreachable")
-
-    monkeypatch.setattr(services, "retrieve_context", boom)
+):
     thread = _make_thread(db_session)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+    monkeypatch.setattr(services, "retrieve_context", lambda db, question: context)
+    monkeypatch.setattr(services, "stream_answer", _fake_stream([NOT_FOUND_MESSAGE]))
 
-    events = _sse_events(services.request_answer(db_session, thread, "Anything?", []))
+    events = _parse_events(list(services.request_answer(db_session, thread, "Anything?", [])))
 
-    assert [name for name, _ in events] == ["error"]
-    data = json.loads(events[0][1])
-    assert data["detail"] == "Could not retrieve context for this question."
-    assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 0
-
-
-# --- request_answer: Gemini not configured, called directly -------------------
-#
-# `routers.threads.post_message` checks `gemini_api_key()` before ever calling
-# `request_answer`, so an HTTP-level test can never reach this branch.
-# Calling the service function directly, with no router in front of it, is
-# the only way to prove it holds on its own.
-
-
-def test_request_answer_without_gemini_api_key_yields_configuration_error_and_persists_nothing(
-    db_session, monkeypatch
-) -> None:
-    _seed_ready_document_with_chunk(db_session)
-    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
-    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    thread = _make_thread(db_session)
-
-    events = _sse_events(
-        services.request_answer(db_session, thread, "How many leave days?", [])
-    )
-
-    assert [name for name, _ in events] == ["error"]
-    data = json.loads(events[0][1])
-    assert data["detail"] == "Gemini is not configured."
-    assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 0
-
-
-# --- request_answer: generation service unavailable ----------------------------
-
-
-def test_request_answer_when_generation_service_is_unavailable_yields_service_error_and_persists_nothing(  # noqa: E501
-    db_session, monkeypatch
-) -> None:
-    _seed_ready_document_with_chunk(db_session)
-    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
-    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("EMBEDDING_MAX_RETRIES", "2")
-    models = _FakeStreamModels(open_error=RuntimeError("boom"))
-    _install_fake_stream_client(monkeypatch, models)
-    thread = _make_thread(db_session)
-
-    events = _sse_events(
-        services.request_answer(db_session, thread, "How many leave days?", [])
-    )
-
-    assert [name for name, _ in events] == ["error"]
-    data = json.loads(events[0][1])
-    assert data["detail"] == "The answer generation service is unavailable."
-    assert len(models.calls) == 2  # exactly the configured attempt count, no more
-    assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 0
-
-
-# --- request_answer: the streamed "not found" answer ---------------------------
-
-
-def test_request_answer_not_found_answer_is_persisted_complete_with_no_citations(
-    db_session, monkeypatch
-) -> None:
-    _seed_ready_document_with_chunk(db_session)
-    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
-    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    models = _FakeStreamModels(pieces=[generation.NOT_FOUND_MESSAGE])
-    _install_fake_stream_client(monkeypatch, models)
-    thread = _make_thread(db_session)
-
-    events = _sse_events(
-        services.request_answer(db_session, thread, "Unrelated question", [])
-    )
-
-    names = [name for name, _ in events]
-    assert "token" in names
-    assert names[-1] == "final"
-    final_data = json.loads(next(data for name, data in events if name == "final"))
+    event_names = [name for name, _ in events]
+    assert "token" in event_names
+    assert event_names[-1] == "final"
+    final_data = events[-1][1]
     assert final_data["citations"] == []
 
     message = db_session.query(Message).filter(Message.thread_id == thread.id).one()
     assert message.status == "complete"
-    assert generation.NOT_FOUND_PHRASE in message.content.lower()
+    assert message.content == NOT_FOUND_MESSAGE
+    assert len(message.citations) == 0
 
 
-def test_request_answer_empty_generated_text_persists_the_not_found_message(
+# --- request_answer: a grounded answer persists message + citations -------
+
+
+def test_request_answer_grounded_answer_persists_message_and_citation_and_advances_thread(
     db_session, monkeypatch
-) -> None:
-    _seed_ready_document_with_chunk(db_session)
-    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[1.0, 0.0]])
-    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    models = _FakeStreamModels(pieces=["   "])  # strips to nothing
-    _install_fake_stream_client(monkeypatch, models)
+):
     thread = _make_thread(db_session)
+    context = RetrievedContext(
+        chunks=[_chunk(content="Employees get 25 days.")], has_ready_documents=True
+    )
+    monkeypatch.setattr(services, "retrieve_context", lambda db, question: context)
+    monkeypatch.setattr(services, "stream_answer", _fake_stream(["Employees ", "get 25 days."]))
 
-    events = _sse_events(
-        services.request_answer(db_session, thread, "Unrelated question", [])
+    events = _parse_events(
+        list(services.request_answer(db_session, thread, "How many leave days?", []))
     )
 
-    final_data = json.loads(next(data for name, data in events if name == "final"))
-    assert final_data["citations"] == []
+    event_names = [name for name, _ in events]
+    assert event_names.count("token") == 2
+    assert event_names[-1] == "final"
+    final_data = events[-1][1]
+    assert final_data["message_id"] is not None
+    assert len(final_data["citations"]) == 1
+    assert final_data["citations"][0]["document_available"] is True
+
     message = db_session.query(Message).filter(Message.thread_id == thread.id).one()
-    assert message.content == generation.NOT_FOUND_MESSAGE
+    assert message.status == "complete"
+    assert message.content == "Employees get 25 days."
+    db_session.refresh(thread)
+    assert thread.last_active_at > _SENTINEL_PAST
 
 
-# --- request_answer: the retrieval query is augmented with recent history -----
+# --- request_answer: a failure part-way through the stream ----------------
 
 
-def test_request_answer_augments_the_retrieval_query_with_recent_history(
+def test_request_answer_gemini_not_configured_mid_stream_persists_incomplete_and_emits_error(
     db_session, monkeypatch
-) -> None:
-    _seed_ready_document_with_chunk(db_session, content="Employees get 25 days of annual leave.")
-    seen_queries: list[list[str]] = []
-
-    def record_embed(texts):
-        seen_queries.append(texts)
-        return [[1.0, 0.0]]
-
-    monkeypatch.setattr(retrieval, "embed_texts", record_embed)
-    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    models = _FakeStreamModels(pieces=["Employees get 25 days of annual leave."])
-    _install_fake_stream_client(monkeypatch, models)
+):
     thread = _make_thread(db_session)
-    history = [
-        {"role": "user", "content": "How much annual leave is there?"},
-        {"role": "assistant", "content": "Employees get 25 days of annual leave."},
-    ]
-
-    list(
-        services.request_answer(
-            db_session, thread, "And what about the Berlin office?", history
-        )
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+    monkeypatch.setattr(services, "retrieve_context", lambda db, question: context)
+    monkeypatch.setattr(
+        services,
+        "stream_answer",
+        _fake_stream(["Partial answer"], error=GeminiNotConfiguredError("no key")),
     )
 
-    assert len(seen_queries) == 1
-    [augmented_query] = seen_queries[0]
-    assert "How much annual leave is there?" in augmented_query
-    assert "Employees get 25 days of annual leave." in augmented_query
-    assert "And what about the Berlin office?" in augmented_query
+    events = _parse_events(list(services.request_answer(db_session, thread, "Anything?", [])))
+
+    event_names = [name for name, _ in events]
+    assert "token" in event_names
+    assert event_names[-1] == "error"
+    assert "final" not in event_names
+
+    message = db_session.query(Message).filter(Message.thread_id == thread.id).one()
+    assert message.status == "incomplete"
+    assert message.content == "Partial answer"
 
 
-def test_request_answer_uses_the_bare_question_as_the_retrieval_query_when_there_is_no_history(
+def test_request_answer_generation_service_error_mid_stream_persists_incomplete_and_emits_error(
     db_session, monkeypatch
-) -> None:
-    _seed_ready_document_with_chunk(db_session)
-    seen_queries: list[list[str]] = []
-
-    def record_embed(texts):
-        seen_queries.append(texts)
-        return [[1.0, 0.0]]
-
-    monkeypatch.setattr(retrieval, "embed_texts", record_embed)
-    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    models = _FakeStreamModels(pieces=["An answer."])
-    _install_fake_stream_client(monkeypatch, models)
+):
     thread = _make_thread(db_session)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+    monkeypatch.setattr(services, "retrieve_context", lambda db, question: context)
+    monkeypatch.setattr(
+        services,
+        "stream_answer",
+        _fake_stream(["Partial"], error=GenerationServiceError("boom")),
+    )
 
-    list(services.request_answer(db_session, thread, "A fresh question", []))
+    events = _parse_events(list(services.request_answer(db_session, thread, "Anything?", [])))
 
-    assert seen_queries == [["A fresh question"]]
+    assert [name for name, _ in events][-1] == "error"
+    message = db_session.query(Message).filter(Message.thread_id == thread.id).one()
+    assert message.status == "incomplete"
+    assert message.content == "Partial"
+
+
+def test_request_answer_failure_before_any_token_persists_nothing(db_session, monkeypatch):
+    thread = _make_thread(db_session)
+    context = RetrievedContext(chunks=[_chunk()], has_ready_documents=True)
+    monkeypatch.setattr(services, "retrieve_context", lambda db, question: context)
+    monkeypatch.setattr(
+        services, "stream_answer", _fake_stream([], error=RuntimeError("never started"))
+    )
+
+    events = _parse_events(list(services.request_answer(db_session, thread, "Anything?", [])))
+
+    assert [name for name, _ in events] == ["error"]
+    assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 0

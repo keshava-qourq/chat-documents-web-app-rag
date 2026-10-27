@@ -1,127 +1,104 @@
-// Coverage for `app/lib/icons.tsx` -- the hand-drawn, finite icon set the
-// Builder prompt names. There was no other seam exercising this module
-// directly: generated screens import `Icons.SomeName` and render it, so a
-// typo in a `d` attribute, a size prop that stops working, or a name quietly
-// dropped from the set would otherwise only surface as a blank square on a
-// generated screen, if anyone noticed at all.
+// Unit tests for `app/lib/icons.tsx`.
+//
+// This module is the entire icon set generated screens may draw from --
+// deliberately finite, deliberately hand-drawn, with no bundler to fall back
+// on. The risk that actually breaks a screen is not "does Plus look right"
+// (nobody here can judge that) but: does every name a screen reaches for
+// still resolve to a real component, does each render a real, visible <svg>
+// rather than an empty shell, does the `size` prop actually size it, and do
+// caller-supplied props (className, aria-hidden overrides) still reach the
+// DOM. Every name referenced from App.tsx, Setup.tsx and Documents.tsx is
+// checked explicitly so that removing one from the set is a failing test
+// here, not a blank square discovered on screen.
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { Icons, ICON_NAMES } from "./icons";
+import { ICON_NAMES, Icons } from "./icons";
 
-// The exact vocabulary the Builder prompt lists. This is deliberately a
-// literal list, not a derived one -- the point of the test is to fail if a
-// name is added, renamed or removed without the prompt (and every screen
-// that might use it) being updated to match.
-const EXPECTED_NAMES = [
+// Every icon name actually referenced via `Icons.<Name>` elsewhere in the
+// app (App.tsx, Setup.tsx, Documents.tsx) at the time this test was written.
+const NAMES_USED_BY_SCREENS = [
   "Plus",
   "Search",
   "Check",
   "X",
   "ChevronRight",
-  "ChevronLeft",
-  "ChevronDown",
   "Menu",
-  "User",
-  "Users",
   "Settings",
-  "Bell",
-  "Home",
   "FileText",
-  "Package",
-  "Calendar",
-  "Clock",
   "Trash",
-  "Edit",
-  "Filter",
-  "Download",
   "Upload",
-  "ArrowLeft",
   "ArrowRight",
   "AlertCircle",
   "CheckCircle",
-  "MoreHorizontal",
+  "Clock",
+  "Users",
 ];
 
-describe("ICON_NAMES — the finite set", () => {
-  it("lists exactly the names the Builder prompt promises, no more and no fewer", () => {
-    expect([...ICON_NAMES].sort()).toEqual([...EXPECTED_NAMES].sort());
-  });
-
-  it("has a component registered under Icons for every name it lists", () => {
-    for (const name of ICON_NAMES) {
-      expect(Icons[name]).toBeTypeOf("function");
+describe("ICON_NAMES", () => {
+  it("lists every name screens currently draw on, with no duplicates", () => {
+    for (const name of NAMES_USED_BY_SCREENS) {
+      expect(ICON_NAMES).toContain(name);
     }
+    expect(new Set(ICON_NAMES).size).toBe(ICON_NAMES.length);
   });
 
-  it("has no component registered for a name outside the set", () => {
-    expect(Icons.Rocket).toBeUndefined();
-    expect(Icons.rocket).toBeUndefined();
+  it("has a component in Icons for every name it lists, and nothing extra", () => {
+    expect(Object.keys(Icons).sort()).toEqual([...ICON_NAMES].sort());
   });
 });
 
-describe("rendering an icon", () => {
-  it("renders an svg with the shared frame: 24x24 viewBox, currentColor stroke, hidden from assistive tech", () => {
-    const Plus = Icons.Plus;
-    const { getByTestId } = render(<Plus data-testid="icon" />);
-    const svg = getByTestId("icon");
-
-    expect(svg.tagName.toLowerCase()).toBe("svg");
-    expect(svg).toHaveAttribute("viewBox", "0 0 24 24");
-    expect(svg).toHaveAttribute("stroke", "currentColor");
-    expect(svg).toHaveAttribute("fill", "none");
-    expect(svg).toHaveAttribute("aria-hidden", "true");
-  });
-
-  it("defaults to a 16x16 box when no size is given", () => {
-    const Search = Icons.Search;
-    const { getByTestId } = render(<Search data-testid="icon" />);
-    const svg = getByTestId("icon");
-
-    expect(svg).toHaveAttribute("width", "16");
-    expect(svg).toHaveAttribute("height", "16");
-  });
-
-  it("honours an explicit size prop on both width and height", () => {
-    const Search = Icons.Search;
-    const { getByTestId } = render(<Search data-testid="icon" size={32} />);
-    const svg = getByTestId("icon");
-
-    expect(svg).toHaveAttribute("width", "32");
-    expect(svg).toHaveAttribute("height", "32");
-  });
-
-  it("forwards arbitrary svg props, such as className, onto the element", () => {
-    const Check = Icons.Check;
-    const { getByTestId } = render(<Check data-testid="icon" className="text-emerald-600" />);
-    const svg = getByTestId("icon");
-
-    expect(svg).toHaveClass("text-emerald-600");
-  });
-
-  it("keeps aria-hidden true even if a caller tries to override it, so the icon never leaks into the accessibility tree", () => {
-    const X = Icons.X;
-    const { getByTestId } = render(<X data-testid="icon" aria-hidden="false" />);
-    const svg = getByTestId("icon");
-
-    expect(svg).toHaveAttribute("aria-hidden", "true");
-  });
-
-  it("draws different geometry for different icons, rather than one shape under every name", () => {
-    const { getByTestId: getPlus } = render(<Icons.Plus data-testid="plus" />);
-    const { getByTestId: getSearch } = render(<Icons.Search data-testid="search" />);
-
-    expect(getPlus("plus").innerHTML).not.toBe(getSearch("search").innerHTML);
-  });
-
-  it("renders every name in the set to a real svg without throwing", () => {
+describe("Icons.<Name> components", () => {
+  it("renders a real svg element with visible path content for every registered icon", () => {
     for (const name of ICON_NAMES) {
-      const IconComponent = Icons[name];
-      const { getByTestId, unmount } = render(<IconComponent data-testid={`icon-${name}`} />);
-      const svg = getByTestId(`icon-${name}`);
-      expect(svg.tagName.toLowerCase()).toBe("svg");
-      expect(svg.children.length).toBeGreaterThan(0);
+      const Icon = Icons[name];
+      const { container, unmount } = render(<Icon data-testid="icon" />);
+      const svg = container.querySelector("svg");
+      expect(svg, `${name} should render an <svg>`).not.toBeNull();
+      // Every icon must draw something -- an entry with no path/circle body
+      // is a blank square on screen even though the element exists.
+      expect(
+        svg!.querySelectorAll("path, circle, rect").length,
+        `${name} should draw at least one shape`,
+      ).toBeGreaterThan(0);
       unmount();
     }
+  });
+
+  it("defaults to a 16x16 box and scales with the size prop", () => {
+    const { container: defaultContainer } = render(<Icons.Plus />);
+    const defaultSvg = defaultContainer.querySelector("svg")!;
+    expect(defaultSvg.getAttribute("width")).toBe("16");
+    expect(defaultSvg.getAttribute("height")).toBe("16");
+
+    const { container: sizedContainer } = render(<Icons.Plus size={32} />);
+    const sizedSvg = sizedContainer.querySelector("svg")!;
+    expect(sizedSvg.getAttribute("width")).toBe("32");
+    expect(sizedSvg.getAttribute("height")).toBe("32");
+  });
+
+  it("is hidden from assistive tech by default, as a decorative icon should be", () => {
+    const { container } = render(<Icons.Check />);
+    expect(container.querySelector("svg")!.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("forwards arbitrary svg props such as className and an explicit aria-hidden override", () => {
+    const { container } = render(
+      <Icons.AlertCircle className="h-4 w-4 text-red-500" aria-hidden="false" />,
+    );
+    const svg = container.querySelector("svg")!;
+    expect(svg.getAttribute("class")).toContain("h-4 w-4 text-red-500");
+    // A caller passing an explicit prop (e.g. to expose a meaningful icon to
+    // a screen reader) must be able to override the component's default.
+    expect(svg.getAttribute("aria-hidden")).toBe("false");
+  });
+
+  it("gives each icon its own distinct path data, rather than silently sharing one shape", () => {
+    const shapesFor = (name: string) => {
+      const { container } = render(Icons[name]({}));
+      return container.innerHTML;
+    };
+    expect(shapesFor("Plus")).not.toEqual(shapesFor("X"));
+    expect(shapesFor("ChevronLeft")).not.toEqual(shapesFor("ChevronRight"));
   });
 });

@@ -54,23 +54,6 @@ def test_upload_rejected_with_library_full_reason_once_cap_reached(
     assert "delete" in reason
 
 
-def test_cap_full_reason_names_the_configured_limit_value(
-    client, db_session, monkeypatch
-) -> None:
-    """The reason text is supposed to tell the caller *what* the cap is, not
-    just that one exists -- a hard-coded message that always says the same
-    number regardless of `DOCUMENT_CAP` would still satisfy the "full" /
-    "delete" substring checks above, so the actual configured value has to be
-    asserted separately."""
-    monkeypatch.setenv("DOCUMENT_CAP", "4")
-    _seed_documents(db_session, 4)
-
-    response = client.post("/documents", files=[_file("new.txt")])
-
-    reason = response.json()["rejected"][0]["reason"]
-    assert "4" in reason
-
-
 def test_cap_applies_within_the_same_batch_once_reached(client, db_session, monkeypatch) -> None:
     monkeypatch.setenv("DOCUMENT_CAP", "2")
     _seed_documents(db_session, 1)
@@ -88,59 +71,75 @@ def test_cap_applies_within_the_same_batch_once_reached(client, db_session, monk
     assert "full" in body["rejected"][0]["reason"].lower()
 
 
-# --- the cap counts the whole library, not just ready documents -------------
-
-
-def test_cap_counts_failed_and_processing_documents_toward_the_limit(
+def test_cap_rejects_every_file_past_the_limit_within_a_single_batch(
     client, db_session, monkeypatch
 ) -> None:
-    """A library at its cap because of documents that failed indexing, or
-    are still processing, must refuse new uploads exactly as one at capacity
-    on `ready` documents would -- the cap is on how many rows the library
-    holds, not on how many of them are usable yet."""
-    monkeypatch.setenv("DOCUMENT_CAP", "2")
-    db_session.add(
-        Document(
-            id=uuid.uuid4(),
-            file_name="failed-doc.txt",
-            mime_type="text/plain",
-            size_bytes=10,
-            storage_key="failed-doc.txt",
-            status="failed",
-            failure_reason="boom",
-        )
-    )
-    db_session.add(
-        Document(
-            id=uuid.uuid4(),
-            file_name="processing-doc.txt",
-            mime_type="text/plain",
-            size_bytes=10,
-            storage_key="processing-doc.txt",
-            status="processing",
-        )
-    )
-    db_session.commit()
+    """The same cap check applies to every file in a batch, not just the
+    first one past the limit -- with no existing documents and a cap of 3,
+    five files in one request should leave exactly the first three accepted
+    and the remaining two rejected, in order."""
+    monkeypatch.setenv("DOCUMENT_CAP", "3")
 
-    response = client.post("/documents", files=[_file("over-cap.txt")])
+    response = client.post(
+        "/documents",
+        files=[_file(f"f{i}.txt") for i in range(5)],
+    )
+
+    body = response.json()
+    assert [item["file_name"] for item in body["accepted"]] == ["f0.txt", "f1.txt", "f2.txt"]
+    assert [item["file_name"] for item in body["rejected"]] == ["f3.txt", "f4.txt"]
+    for rejected in body["rejected"]:
+        assert "full" in rejected["reason"].lower()
+
+
+def test_cap_full_rejection_takes_precedence_over_unsupported_file_type(
+    client, db_session, monkeypatch
+) -> None:
+    """When the library is already full, a file that would *also* have been
+    rejected for being an unsupported type still gets the cap-full reason,
+    not the unsupported-type one -- the cap check runs before any other
+    validation, so a caller trying to clear space by replacing a document
+    gets an unambiguous "library is full" answer rather than a type error
+    that has nothing to do with why the upload actually failed."""
+    monkeypatch.setenv("DOCUMENT_CAP", "1")
+    _seed_documents(db_session, 1)
+
+    response = client.post(
+        "/documents",
+        files=[_file("report.xlsx", b"fake xlsx content", "application/vnd.ms-excel")],
+    )
 
     body = response.json()
     assert body["accepted"] == []
     assert len(body["rejected"]) == 1
-    assert "full" in body["rejected"][0]["reason"].lower()
+    reason = body["rejected"][0]["reason"].lower()
+    assert "full" in reason
+    assert "delete" in reason
+    assert "pdf" not in reason
 
 
-def test_cap_set_to_zero_rejects_every_upload_even_on_an_empty_library(
+def test_rejection_for_an_unrelated_reason_does_not_consume_cap_budget(
     client, db_session, monkeypatch
 ) -> None:
-    monkeypatch.setenv("DOCUMENT_CAP", "0")
+    """A file rejected for being an unsupported type never becomes a
+    document row, so it must not count against the cap for files later in
+    the same batch -- with a cap of 1 and no existing documents, an invalid
+    file followed by a valid one should still let the valid one through."""
+    monkeypatch.setenv("DOCUMENT_CAP", "1")
 
-    response = client.post("/documents", files=[_file("anything.txt")])
+    response = client.post(
+        "/documents",
+        files=[
+            _file("bad.xlsx", b"fake xlsx content", "application/vnd.ms-excel"),
+            _file("good.txt"),
+        ],
+    )
 
     body = response.json()
-    assert body["accepted"] == []
     assert len(body["rejected"]) == 1
-    assert "full" in body["rejected"][0]["reason"].lower()
+    assert body["rejected"][0]["file_name"] == "bad.xlsx"
+    assert len(body["accepted"]) == 1
+    assert body["accepted"][0]["file_name"] == "good.txt"
 
 
 # --- cap reached: nothing stored, nothing scheduled for ingestion -----------

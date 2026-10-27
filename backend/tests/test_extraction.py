@@ -1,237 +1,191 @@
-"""Unit tests for `app.extraction.extract_fragments` and its per-format
-helpers.
+"""Unit tests for `app/extraction.py` in isolation from the rest of the
+ingestion pipeline (chunking, embeddings and persistence are covered in
+`test_ingestion.py`, which also exercises `extract_fragments` for the four
+supported extensions at a basic level -- one real PDF with no text layer,
+one DOCX with and without headings, a plain TXT/MD file, an empty file, and
+an unsupported extension). This file reaches the cases that coverage leaves
+open: PDF page numbering across multiple pages (including a mix of blank and
+non-blank pages, and `extract_text()` returning `None` rather than `""`),
+DOCX paragraphs appearing before any heading, a heading whose own text is
+blank, consecutive headings with no body between them, an empty DOCX
+document, extension case-insensitivity, and plain-text content that is not
+valid UTF-8.
 
-Exercises the extractor directly against raw bytes -- no database, no
-object store, no chunking or ingestion pipeline. `backend/app/tests/
-test_ingestion.py` (not part of this suite's `testpaths`, see pytest.ini)
-touches a handful of these cases incidentally while testing the pipeline
-around it; these tests pin down extraction's own contract: the
-`(text, source_location)` fragment shape for each of the four supported
-formats, the page-numbering and empty-page rules for PDF, the
-heading-grouping rules for DOCX, and the dispatch/validation behaviour of
-`extract_fragments` itself.
+No acceptance criteria are attached to this ticket ("Unit tests for
+backend/app/extraction.py"); the cases below follow from the module's own
+documented contract instead. The PDF tests fake `PdfReader` itself rather
+than building a real text-layer PDF (which pypdf has no convenient way to
+produce) -- what is under test here is `extraction._extract_pdf`'s own
+page-numbering and blank-page-skipping logic, not pypdf's text extraction,
+so a fake page object with a controllable `extract_text()` return value
+exercises exactly that logic.
 """
-
-import io
 
 import pytest
 from docx import Document as DocxDocument
-from pypdf import PdfWriter
 
 from app import extraction
 
-# --- PDF test fixtures -------------------------------------------------------
+
+class _FakePdfPage:
+    def __init__(self, text: str | None) -> None:
+        self._text = text
+
+    def extract_text(self) -> str | None:
+        return self._text
 
 
-def _blank_pdf_bytes(page_count: int) -> bytes:
-    """pypdf's `PdfWriter` has no API for drawing text, so blank pages are
-    the easy, reliable way to produce a PDF with no text layer at all --
-    standing in for a scanned page."""
-    writer = PdfWriter()
-    for _ in range(page_count):
-        writer.add_blank_page(width=200, height=200)
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    return buffer.getvalue()
+class _FakePdfReader:
+    def __init__(self, pages_text: list[str | None]) -> None:
+        self.pages = [_FakePdfPage(text) for text in pages_text]
 
 
-def _build_pdf_with_text(pages_text: list[str]) -> bytes:
-    """Hand-rolls a minimal multi-page PDF with a real text layer (one `Tj`
-    show-text operator per page), since the project has no PDF-generation
-    library in requirements.txt and `PdfWriter` cannot draw text. A page
-    whose text is the empty string gets a content stream that shows nothing,
-    standing in for a page with no extractable text alongside pages that do
-    have one, so page numbering across a mixed document can be checked.
-    Object offsets for the xref table are computed from what is actually
-    written, so this stays correct if the content above it changes."""
-    objects: list[bytes] = []
-
-    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
-    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(len(pages_text)))
-    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages_text)} >>".encode())
-
-    font_obj_num = 3 + 2 * len(pages_text)
-    for i, text in enumerate(pages_text):
-        page_num = 3 + 2 * i
-        content_num = page_num + 1
-        objects.append(
-            (
-                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
-                f"/Resources << /Font << /F1 {font_obj_num} 0 R >> >> "
-                f"/Contents {content_num} 0 R >>"
-            ).encode()
-        )
-        stream = f"BT /F1 24 Tf 10 100 Td ({text}) Tj ET".encode()
-        objects.append(
-            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
-        )
-
-    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-
-    buffer = io.BytesIO()
-    buffer.write(b"%PDF-1.4\n")
-    offsets: list[int] = []
-    for i, obj in enumerate(objects, start=1):
-        offsets.append(buffer.tell())
-        buffer.write(f"{i} 0 obj\n".encode())
-        buffer.write(obj)
-        buffer.write(b"\nendobj\n")
-
-    xref_offset = buffer.tell()
-    count = len(objects) + 1
-    buffer.write(f"xref\n0 {count}\n".encode())
-    buffer.write(b"0000000000 65535 f \n")
-    for offset in offsets:
-        buffer.write(f"{offset:010d} 00000 n \n".encode())
-    buffer.write(
-        f"trailer\n<< /Size {count} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode()
-    )
-    return buffer.getvalue()
+def _patch_pdf_reader(monkeypatch, pages_text: list[str | None]) -> None:
+    monkeypatch.setattr(extraction, "PdfReader", lambda stream: _FakePdfReader(pages_text))
 
 
-# --- PDF extraction -----------------------------------------------------------
+# --- PDF ---------------------------------------------------------------
 
 
-def test_extract_pdf_returns_one_fragment_per_page_with_correct_page_numbers() -> None:
-    content = _build_pdf_with_text(["First page text", "Second page text"])
+def test_extract_pdf_numbers_fragments_by_their_actual_one_based_page_number(monkeypatch) -> None:
+    """A blank page in the middle must not shift the page number reported
+    for the page after it -- page 3's fragment must still say "page 3", not
+    "page 2"."""
+    _patch_pdf_reader(monkeypatch, ["Page one text", "", "Page three text"])
 
-    fragments = extraction.extract_fragments(content, ".pdf", "report.pdf")
+    fragments = extraction.extract_fragments(b"irrelevant", ".pdf", "doc.pdf")
 
     assert fragments == [
-        ("First page text", "report.pdf, page 1"),
-        ("Second page text", "report.pdf, page 2"),
+        ("Page one text", "doc.pdf, page 1"),
+        ("Page three text", "doc.pdf, page 3"),
     ]
 
 
-def test_extract_pdf_skips_pages_with_no_text_but_keeps_true_page_numbers_for_the_rest() -> None:
-    # Page 1 has no text layer (as a scanned page would); page 2 does. The
-    # fragment for page 2 must still say "page 2", not "page 1" -- the
-    # numbering tracks the page's real position, not the fragment's.
-    content = _build_pdf_with_text(["", "Second page text"])
+def test_extract_pdf_extract_text_returning_none_is_treated_as_a_blank_page(monkeypatch) -> None:
+    """pypdf's `extract_text()` can return `None` as well as `""`; both must
+    be treated as "no text on this page", not raise on `.strip()`."""
+    _patch_pdf_reader(monkeypatch, [None, "Real content"])
 
-    fragments = extraction.extract_fragments(content, ".pdf", "mixed.pdf")
+    fragments = extraction.extract_fragments(b"irrelevant", ".pdf", "doc.pdf")
 
-    assert fragments == [("Second page text", "mixed.pdf, page 2")]
+    assert fragments == [("Real content", "doc.pdf, page 2")]
 
 
-def test_extract_pdf_all_blank_pages_yields_no_fragments() -> None:
-    content = _blank_pdf_bytes(page_count=2)
+def test_extract_pdf_whitespace_only_page_text_yields_no_fragment(monkeypatch) -> None:
+    _patch_pdf_reader(monkeypatch, ["   \n\t  "])
 
-    fragments = extraction.extract_fragments(content, ".pdf", "scanned.pdf")
+    fragments = extraction.extract_fragments(b"irrelevant", ".pdf", "doc.pdf")
 
     assert fragments == []
 
 
-# --- DOCX extraction -----------------------------------------------------------
+def test_extract_pdf_strips_surrounding_whitespace_from_page_text(monkeypatch) -> None:
+    _patch_pdf_reader(monkeypatch, ["  padded text  \n"])
+
+    fragments = extraction.extract_fragments(b"irrelevant", ".pdf", "doc.pdf")
+
+    assert fragments == [("padded text", "doc.pdf, page 1")]
 
 
-def test_extract_docx_groups_text_under_headings_with_file_name_prefix() -> None:
-    document = DocxDocument()
-    document.add_heading("Introduction", level=1)
-    document.add_paragraph("This is the intro body.")
-    document.add_heading("Conclusion", level=1)
-    document.add_paragraph("This is the conclusion body.")
+# --- DOCX ---------------------------------------------------------------
+
+
+def _docx_bytes(document: DocxDocument) -> bytes:
+    import io
+
     buffer = io.BytesIO()
     document.save(buffer)
+    return buffer.getvalue()
 
-    fragments = extraction.extract_fragments(buffer.getvalue(), ".docx", "notes.docx")
+
+def test_extract_docx_text_before_the_first_heading_is_located_at_the_file_name() -> None:
+    """Paragraphs appearing before any heading have no heading to be grouped
+    under, so their fragment's location must fall back to the file name --
+    and a heading appearing afterwards must switch later paragraphs to being
+    located under it."""
+    document = DocxDocument()
+    document.add_paragraph("Preamble text with no heading above it.")
+    document.add_heading("Later Section", level=1)
+    document.add_paragraph("Body under the later section.")
+
+    fragments = extraction.extract_fragments(_docx_bytes(document), ".docx", "report.docx")
 
     assert fragments == [
-        ("This is the intro body.", "notes.docx, Introduction"),
-        ("This is the conclusion body.", "notes.docx, Conclusion"),
+        ("Preamble text with no heading above it.", "report.docx"),
+        ("Body under the later section.", "report.docx, Later Section"),
     ]
 
 
-def test_extract_docx_joins_multiple_paragraphs_under_one_heading_with_newlines() -> None:
+def test_extract_docx_consecutive_headings_with_no_body_produce_no_fragment_for_the_empty_one() -> (
+    None
+):
+    document = DocxDocument()
+    document.add_heading("Empty Section", level=1)
+    document.add_heading("Section With Content", level=1)
+    document.add_paragraph("Only this section has a body.")
+
+    fragments = extraction.extract_fragments(_docx_bytes(document), ".docx", "doc.docx")
+
+    assert fragments == [("Only this section has a body.", "doc.docx, Section With Content")]
+
+
+def test_extract_docx_heading_with_blank_text_keeps_the_previous_heading_as_location() -> None:
+    """An empty/whitespace-only heading paragraph must not blank out the
+    location for the body that follows it -- the code falls back to keeping
+    the previous heading rather than switching to `None`."""
+    document = DocxDocument()
+    document.add_heading("Real Heading", level=1)
+    document.add_heading("   ", level=2)
+    document.add_paragraph("Body after the blank heading.")
+
+    fragments = extraction.extract_fragments(_docx_bytes(document), ".docx", "doc.docx")
+
+    assert fragments == [("Body after the blank heading.", "doc.docx, Real Heading")]
+
+
+def test_extract_docx_empty_document_returns_no_fragments() -> None:
+    document = DocxDocument()
+
+    fragments = extraction.extract_fragments(_docx_bytes(document), ".docx", "empty.docx")
+
+    assert fragments == []
+
+
+def test_extract_docx_multiple_paragraphs_under_one_heading_are_joined_into_one_fragment() -> None:
     document = DocxDocument()
     document.add_heading("Section", level=1)
     document.add_paragraph("First line.")
     document.add_paragraph("Second line.")
-    buffer = io.BytesIO()
-    document.save(buffer)
 
-    fragments = extraction.extract_fragments(buffer.getvalue(), ".docx", "notes.docx")
+    fragments = extraction.extract_fragments(_docx_bytes(document), ".docx", "doc.docx")
 
-    assert fragments == [("First line.\nSecond line.", "notes.docx, Section")]
+    assert fragments == [("First line.\nSecond line.", "doc.docx, Section")]
 
 
-def test_extract_docx_with_no_headings_uses_file_name_alone_as_location() -> None:
-    document = DocxDocument()
-    document.add_paragraph("No headings here, just body text.")
-    buffer = io.BytesIO()
-    document.save(buffer)
-
-    fragments = extraction.extract_fragments(buffer.getvalue(), ".docx", "plain.docx")
-
-    assert fragments == [("No headings here, just body text.", "plain.docx")]
+# --- dispatch / plain text ------------------------------------------------
 
 
-def test_extract_docx_heading_with_no_body_text_produces_no_fragment_for_it() -> None:
-    # Two consecutive headings: the first has no paragraph before the next
-    # heading, so it must not surface as an empty fragment.
-    document = DocxDocument()
-    document.add_heading("Empty Section", level=1)
-    document.add_heading("Real Section", level=1)
-    document.add_paragraph("Body text for the real section.")
-    buffer = io.BytesIO()
-    document.save(buffer)
-
-    fragments = extraction.extract_fragments(buffer.getvalue(), ".docx", "notes.docx")
-
-    assert fragments == [("Body text for the real section.", "notes.docx, Real Section")]
+def test_extract_fragments_extension_matching_is_case_insensitive() -> None:
+    fragments = extraction.extract_fragments(b"hello", ".TXT", "readme.txt")
+    assert fragments == [("hello", "readme.txt")]
 
 
-def test_extract_docx_with_no_paragraphs_at_all_yields_no_fragments() -> None:
-    document = DocxDocument()
-    buffer = io.BytesIO()
-    document.save(buffer)
+def test_extract_plain_invalid_utf8_bytes_are_replaced_rather_than_raising() -> None:
+    """Non-UTF-8 bytes must not raise `UnicodeDecodeError`: the module
+    docstring commits to extraction always producing a terminal document
+    status (ready or failed with a clear reason), never an unhandled
+    exception from a byte sequence a user's editor happened to save."""
+    content = b"before \xff\xfe after"
 
-    fragments = extraction.extract_fragments(buffer.getvalue(), ".docx", "empty.docx")
-
-    assert fragments == []
-
-
-# --- TXT / MD extraction -------------------------------------------------------
-
-
-def test_extract_txt_returns_single_fragment_located_at_file_name() -> None:
-    fragments = extraction.extract_fragments(b"hello world", ".txt", "readme.txt")
-    assert fragments == [("hello world", "readme.txt")]
-
-
-def test_extract_md_returns_single_fragment_located_at_file_name() -> None:
-    fragments = extraction.extract_fragments(b"# Title\n\nbody", ".md", "summary.md")
-    assert fragments == [("# Title\n\nbody", "summary.md")]
-
-
-def test_extract_plain_strips_leading_and_trailing_whitespace() -> None:
-    fragments = extraction.extract_fragments(b"  \n padded content \n  ", ".txt", "padded.txt")
-    assert fragments == [("padded content", "padded.txt")]
-
-
-def test_extract_plain_empty_or_whitespace_only_file_yields_no_fragments() -> None:
-    assert extraction.extract_fragments(b"", ".txt", "empty.txt") == []
-    assert extraction.extract_fragments(b"   \n  ", ".md", "empty.md") == []
-
-
-def test_extract_plain_replaces_bytes_that_are_not_valid_utf8_instead_of_raising() -> None:
-    # 0xff is not valid UTF-8 anywhere; the extractor must not raise on it.
-    fragments = extraction.extract_fragments(b"valid \xff text", ".txt", "mixed.txt")
+    fragments = extraction.extract_fragments(content, ".txt", "garbled.txt")
 
     assert len(fragments) == 1
     text, location = fragments[0]
-    assert location == "mixed.txt"
-    assert "valid" in text and "text" in text
+    assert location == "garbled.txt"
+    assert "before" in text
+    assert "after" in text
 
 
-# --- dispatch and validation ---------------------------------------------------
-
-
-def test_extract_fragments_is_case_insensitive_on_the_extension() -> None:
-    fragments = extraction.extract_fragments(b"hello world", ".TXT", "readme.txt")
-    assert fragments == [("hello world", "readme.txt")]
-
-
-def test_extract_fragments_unsupported_extension_raises_value_error() -> None:
+def test_extract_fragments_unsupported_extension_message_names_the_extension() -> None:
     with pytest.raises(ValueError, match=r"\.xlsx"):
         extraction.extract_fragments(b"data", ".xlsx", "sheet.xlsx")

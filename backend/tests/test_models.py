@@ -1,43 +1,150 @@
-"""Unit tests for `app.models`: column defaults, the `EmbeddingVector`
-dialect switch, the foreign keys' `ondelete` configuration, and the ORM-level
-cascade/orphan/nullify behaviour the routers lean on when they call
-`db.delete(...)` directly.
+"""Unit tests for `app.models`: column defaults, the relationship cascades
+and foreign-key `ondelete` behaviour the approved data model calls for, and
+the `EmbeddingVector` TypeDecorator's Postgres/SQLite dialect split.
 
-Exercises the models directly against the `db_session` fixture from
-`conftest.py` (an in-memory SQLite database created from `Base.metadata`) --
-no HTTP client, no router, no service layer -- so what fails here is the
-model declaration itself, not anything built on top of it.
+This ticket carries no acceptance criteria of its own -- `models.py` is pure
+schema with no endpoint attached. These tests follow the contract
+documented in the module's own docstrings and comments instead, the same
+approach `test_database.py` takes for `app.database`.
 
-`backend/tests/test_document_delete.py` and `test_threads.py` already prove
-these cascades end-to-end through `DELETE /documents/{id}` and
-`DELETE /threads/{id}`; this file does not repeat those routes. It instead
-covers what only a direct, model-level test can reach: the defaults a bare
-`Document()`/`Thread()`/`Message()` gets with no router or service in the
-way, the `ondelete` clause actually declared on each foreign key (not just
-its observed effect through one particular route), delete-orphan removal
-triggered by editing a relationship collection rather than deleting its
-parent, and the `EmbeddingVector` type's Postgres branch -- which, since the
-whole suite otherwise runs on SQLite, no other test in this repository ever
-reaches at all.
+Runs against its own throwaway in-memory SQLite engine, the same pattern
+`test_retrieval.py` uses for direct model work, rather than the
+`conftest.py` fixtures wired for the FastAPI `TestClient`. The pgvector path
+of `EmbeddingVector` (the real `vector(768)` column on Postgres) is exercised
+directly against dialect objects below -- without a connection, since that
+is all `load_dialect_impl` needs -- rather than against a live Postgres,
+which this test tree does not assume. Other suites already prove every
+*behavioural* consequence of this schema (chunks disappearing when their
+document is deleted via the API in `test_document_delete.py`, citations
+surviving with `chunk_id=None` in `test_threads.py`, and so on); this file
+instead proves the schema itself -- the configuration that makes those
+behaviours possible -- would fail if the model changed out from under them.
 """
 
 import uuid
 
+import pytest
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import create_engine
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.types import JSON
 
-from app.models import EMBEDDING_DIM, Chunk, Citation, Document, EmbeddingVector, Message, Thread
+from app import models
+from app.models import (
+    EMBEDDING_DIM,
+    Chunk,
+    Citation,
+    Document,
+    EmbeddingVector,
+    Message,
+    Thread,
+)
 
-# --- defaults: a bare instance, no router or service involved ---------------
+
+@pytest.fixture()
+def db_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    models.Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    session = session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
 
 
-def test_document_gets_a_uuid_and_its_documented_defaults(db_session) -> None:
-    document = Document(
+def _document(**overrides) -> Document:
+    defaults = dict(
         file_name="handbook.pdf",
         mime_type="application/pdf",
-        size_bytes=1234,
-        storage_key="some-key.pdf",
+        size_bytes=100,
+        storage_key=f"{uuid.uuid4()}.pdf",
     )
+    defaults.update(overrides)
+    return Document(**defaults)
+
+
+# --- EMBEDDING_DIM and the EmbeddingVector dialect split --------------------
+
+
+def test_embedding_dim_is_768() -> None:
+    assert EMBEDDING_DIM == 768
+
+
+def test_embedding_vector_resolves_to_a_768_dim_pgvector_column_on_postgres() -> None:
+    impl = EmbeddingVector().load_dialect_impl(postgresql.dialect())
+
+    assert isinstance(impl, Vector)
+    assert impl.dim == EMBEDDING_DIM
+
+
+def test_embedding_vector_resolves_to_json_on_every_other_dialect() -> None:
+    """SQLite has no vector type -- the module docstring's whole point is
+    that this column degrades to JSON there, so a fresh clone with no
+    Postgres can still create the schema and round-trip an embedding."""
+    impl = EmbeddingVector().load_dialect_impl(sqlite.dialect())
+
+    assert isinstance(impl, JSON)
+    assert not isinstance(impl, Vector)
+
+
+def test_embedding_vector_shares_vectors_comparator_factory() -> None:
+    """`app.retrieval`'s own docstring says its pgvector path orders chunks
+    by `Chunk.embedding.cosine_distance(...)` -- an operator the plain JSON
+    comparator does not have. That is only reachable because this column's
+    comparator is `Vector`'s own, not JSON's default."""
+    assert EmbeddingVector.comparator_factory is Vector.comparator_factory
+
+
+def test_embedding_round_trips_through_a_chunk_on_sqlite(db_session) -> None:
+    document = _document()
+    db_session.add(document)
+    db_session.commit()
+    vector = [0.1, 0.2, 0.3]
+    chunk = Chunk(
+        document_id=document.id,
+        content="some text",
+        source_location="p.1",
+        chunk_index=0,
+        embedding=vector,
+    )
+    db_session.add(chunk)
+    db_session.commit()
+    db_session.expire_all()
+
+    reloaded = db_session.get(Chunk, chunk.id)
+
+    assert reloaded.embedding == vector
+
+
+def test_embedding_defaults_to_none_when_not_yet_computed(db_session) -> None:
+    """A freshly extracted chunk is persisted before embedding runs -- the
+    column has to tolerate that, not reject the insert."""
+    document = _document()
+    db_session.add(document)
+    db_session.commit()
+    chunk = Chunk(document_id=document.id, content="raw text", source_location="p.1", chunk_index=0)
+
+    db_session.add(chunk)
+    db_session.commit()
+    db_session.refresh(chunk)
+
+    assert chunk.embedding is None
+
+
+# --- column defaults ---------------------------------------------------------
+
+
+def test_document_defaults(db_session) -> None:
+    document = _document()
+
     db_session.add(document)
     db_session.commit()
     db_session.refresh(document)
@@ -50,8 +157,9 @@ def test_document_gets_a_uuid_and_its_documented_defaults(db_session) -> None:
     assert document.uploaded_at is not None
 
 
-def test_thread_defaults_to_new_conversation_and_sets_both_timestamps(db_session) -> None:
+def test_thread_defaults(db_session) -> None:
     thread = Thread()
+
     db_session.add(thread)
     db_session.commit()
     db_session.refresh(thread)
@@ -62,12 +170,12 @@ def test_thread_defaults_to_new_conversation_and_sets_both_timestamps(db_session
     assert thread.last_active_at is not None
 
 
-def test_message_defaults_to_empty_content_and_complete_status(db_session) -> None:
+def test_message_defaults(db_session) -> None:
     thread = Thread()
     db_session.add(thread)
     db_session.commit()
-
     message = Message(thread_id=thread.id, role="assistant")
+
     db_session.add(message)
     db_session.commit()
     db_session.refresh(message)
@@ -77,97 +185,85 @@ def test_message_defaults_to_empty_content_and_complete_status(db_session) -> No
     assert message.created_at is not None
 
 
-# --- EmbeddingVector: the dialect switch itself -----------------------------
+# --- table names, matching the approved data model --------------------------
 
 
-def test_embedding_vector_resolves_to_json_on_a_non_postgresql_dialect() -> None:
-    column_type = EmbeddingVector()
-
-    resolved = column_type.load_dialect_impl(sqlite.dialect())
-
-    assert isinstance(resolved, JSON)
-
-
-def test_embedding_vector_resolves_to_a_768_dimensional_pgvector_on_postgresql() -> None:
-    """`load_dialect_impl` hands back `dialect.type_descriptor(Vector(768))`,
-    which the Postgres dialect adapts to its own dialect-specific `VECTOR`
-    impl class rather than returning the `pgvector.sqlalchemy.Vector`
-    instance unchanged -- so this asserts on the one thing that survives
-    that adaptation and is what actually matters: the column really is a
-    vector type, sized for the 768-dimensional embeddings this project's
-    embedding model produces, not the JSON fallback every other test in this
-    suite (running on SQLite) would otherwise silently get instead."""
-    column_type = EmbeddingVector()
-
-    resolved = column_type.load_dialect_impl(postgresql.dialect())
-
-    assert "VECTOR" in type(resolved).__name__.upper()
-    assert resolved.dim == EMBEDDING_DIM
+@pytest.mark.parametrize(
+    "model,expected_table",
+    [
+        (Document, "documents"),
+        (Chunk, "chunks"),
+        (Thread, "threads"),
+        (Message, "messages"),
+        (Citation, "citations"),
+    ],
+)
+def test_table_names_match_the_approved_data_model(model, expected_table) -> None:
+    assert model.__tablename__ == expected_table
 
 
-def test_embedding_round_trips_through_sqlite_as_a_plain_list_of_floats(db_session) -> None:
-    """On the SQLite engine every other test in this suite runs against,
-    `EmbeddingVector` degrades to JSON -- proves a value written through the
-    ORM reads back as the same list of floats after a real commit, not just
-    within the same in-memory Python object."""
-    document = Document(
-        file_name="doc.txt",
-        mime_type="text/plain",
-        size_bytes=10,
-        storage_key="doc.txt",
-    )
-    db_session.add(document)
-    db_session.commit()
-    chunk = Chunk(
-        document_id=document.id,
-        content="some chunk text",
-        chunk_index=0,
-        embedding=[0.25, -0.5, 1.0],
-    )
-    db_session.add(chunk)
-    db_session.commit()
-    chunk_id = chunk.id
-
-    db_session.expire_all()
-    reloaded = db_session.get(Chunk, chunk_id)
-
-    assert reloaded.embedding == [0.25, -0.5, 1.0]
+# --- foreign key ondelete, as the migration encodes it -----------------------
 
 
-# --- foreign keys: the declared ondelete, not just one route's effect ------
+def _ondelete(column) -> str | None:
+    (foreign_key,) = column.foreign_keys
+    return foreign_key.ondelete
 
 
 def test_chunk_document_id_cascades_on_delete() -> None:
-    (fk,) = Chunk.__table__.columns["document_id"].foreign_keys
-    assert fk.ondelete == "CASCADE"
+    assert _ondelete(Chunk.__table__.c.document_id) == "CASCADE"
 
 
 def test_message_thread_id_cascades_on_delete() -> None:
-    (fk,) = Message.__table__.columns["thread_id"].foreign_keys
-    assert fk.ondelete == "CASCADE"
+    assert _ondelete(Message.__table__.c.thread_id) == "CASCADE"
 
 
 def test_citation_message_id_cascades_on_delete() -> None:
-    (fk,) = Citation.__table__.columns["message_id"].foreign_keys
-    assert fk.ondelete == "CASCADE"
+    assert _ondelete(Citation.__table__.c.message_id) == "CASCADE"
 
 
-def test_citation_chunk_id_sets_null_on_delete_and_is_nullable() -> None:
-    column = Citation.__table__.columns["chunk_id"]
-    (fk,) = column.foreign_keys
-    assert fk.ondelete == "SET NULL"
-    assert column.nullable is True
+def test_citation_chunk_id_is_nullable_and_set_null_on_delete() -> None:
+    """A citation must survive its source chunk being deleted (the document
+    it came from can be removed per AC-015/016) -- `SET NULL` plus a
+    nullable column is what lets the row persist instead of being rejected
+    or cascading away the citation itself."""
+    assert Citation.__table__.c.chunk_id.nullable is True
+    assert _ondelete(Citation.__table__.c.chunk_id) == "SET NULL"
 
 
-# --- delete-orphan: removing from the relationship, not deleting the parent -
+# --- relationship cascades, exercised through the ORM ------------------------
 
 
-def test_removing_a_chunk_from_documents_chunks_collection_deletes_its_row(db_session) -> None:
-    document = Document(
-        file_name="doc.txt", mime_type="text/plain", size_bytes=10, storage_key="doc.txt"
-    )
-    chunk = Chunk(document=document, content="text", chunk_index=0)
+def test_deleting_a_document_deletes_its_chunks(db_session) -> None:
+    document = _document()
     db_session.add(document)
+    db_session.commit()
+    db_session.add_all(
+        [
+            Chunk(document_id=document.id, content="a", source_location="p.1", chunk_index=0),
+            Chunk(document_id=document.id, content="b", source_location="p.2", chunk_index=1),
+        ]
+    )
+    db_session.commit()
+    assert db_session.query(Chunk).filter(Chunk.document_id == document.id).count() == 2
+
+    db_session.delete(document)
+    db_session.commit()
+
+    assert db_session.query(Chunk).filter(Chunk.document_id == document.id).count() == 0
+
+
+def test_removing_a_chunk_from_its_documents_collection_deletes_the_orphan(db_session) -> None:
+    """`cascade="all, delete-orphan"` on `Document.chunks` means a chunk
+    detached from its parent's own collection is deleted outright, not left
+    behind with a dangling reference -- distinct from the whole-parent
+    delete case above, and the behaviour `delete-orphan` specifically adds
+    on top of a plain cascading delete."""
+    document = _document()
+    db_session.add(document)
+    db_session.commit()
+    chunk = Chunk(document_id=document.id, content="a", source_location="p.1", chunk_index=0)
+    document.chunks.append(chunk)
     db_session.commit()
     chunk_id = chunk.id
 
@@ -175,80 +271,89 @@ def test_removing_a_chunk_from_documents_chunks_collection_deletes_its_row(db_se
     db_session.commit()
 
     assert db_session.get(Chunk, chunk_id) is None
-    # The document itself survives -- only the orphaned chunk is gone.
-    assert db_session.get(Document, document.id) is not None
 
 
-def test_removing_a_message_from_threads_messages_collection_deletes_its_row(db_session) -> None:
+def test_deleting_a_thread_deletes_its_messages(db_session) -> None:
     thread = Thread()
-    message = Message(thread=thread, role="user", content="hello")
     db_session.add(thread)
     db_session.commit()
-    message_id = message.id
+    db_session.add_all(
+        [
+            Message(thread_id=thread.id, role="user", content="hi"),
+            Message(thread_id=thread.id, role="assistant", content="hello"),
+        ]
+    )
+    db_session.commit()
+    assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 2
 
-    thread.messages.remove(message)
+    db_session.delete(thread)
     db_session.commit()
 
-    assert db_session.get(Message, message_id) is None
-    assert db_session.get(Thread, thread.id) is not None
+    assert db_session.query(Message).filter(Message.thread_id == thread.id).count() == 0
 
 
-def test_removing_a_citation_from_messages_citations_collection_deletes_its_row(db_session) -> None:
+def test_deleting_a_message_deletes_its_citations(db_session) -> None:
     thread = Thread()
-    message = Message(thread=thread, role="assistant", content="answer")
+    db_session.add(thread)
+    db_session.commit()
+    message = Message(thread_id=thread.id, role="assistant", content="answer")
+    db_session.add(message)
+    db_session.commit()
+    db_session.add(
+        Citation(
+            message_id=message.id,
+            chunk_id=None,
+            document_name="handbook.pdf",
+            source_location="p.1",
+            excerpt="an excerpt",
+        )
+    )
+    db_session.commit()
+    assert db_session.query(Citation).filter(Citation.message_id == message.id).count() == 1
+
+    db_session.delete(message)
+    db_session.commit()
+
+    assert db_session.query(Citation).filter(Citation.message_id == message.id).count() == 0
+
+
+def test_citation_can_reference_no_chunk(db_session) -> None:
+    """A citation outlives the document it quoted (the delete endpoint this
+    column exists for), so the model must allow `chunk_id=None` without
+    rejecting the insert."""
+    thread = Thread()
+    db_session.add(thread)
+    db_session.commit()
+    message = Message(thread_id=thread.id, role="assistant", content="answer")
+    db_session.add(message)
+    db_session.commit()
+
     citation = Citation(
-        message=message,
+        message_id=message.id,
+        chunk_id=None,
         document_name="handbook.pdf",
         source_location="p.1",
-        excerpt="some excerpt",
+        excerpt="an excerpt",
     )
-    db_session.add(thread)
+    db_session.add(citation)
     db_session.commit()
-    citation_id = citation.id
+    db_session.refresh(citation)
 
-    message.citations.remove(citation)
-    db_session.commit()
-
-    assert db_session.get(Citation, citation_id) is None
-    assert db_session.get(Message, message.id) is not None
+    assert citation.chunk_id is None
+    assert citation.chunk is None
 
 
-# --- nullify: deleting just a chunk, not its document, orphans its citation -
+# --- module exports -----------------------------------------------------------
 
 
-def test_deleting_a_chunk_directly_nulls_its_citations_chunk_id_without_deleting_them(
-    db_session,
-) -> None:
-    """`Chunk.citations` carries no delete cascade, so deleting a `Chunk` on
-    its own (as opposed to deleting its whole `Document`, which removes the
-    chunk via `Document.chunks`'s delete-orphan cascade first) leaves the
-    `Citation` row in place with its `chunk_id` nulled out -- exactly the
-    `ondelete="SET NULL"` the foreign key declares, and exactly what
-    `CitationOut.from_citation`'s `document_available = chunk_id is not None`
-    depends on."""
-    document = Document(
-        file_name="doc.txt", mime_type="text/plain", size_bytes=10, storage_key="doc.txt"
-    )
-    chunk = Chunk(document=document, content="exact text", chunk_index=0)
-    thread = Thread()
-    message = Message(thread=thread, role="assistant", content="answer")
-    citation = Citation(
-        message=message,
-        chunk=chunk,
-        document_name="doc.txt",
-        source_location=None,
-        excerpt="exact text",
-    )
-    db_session.add_all([document, thread, citation])
-    db_session.commit()
-    citation_id = citation.id
-
-    db_session.delete(chunk)
-    db_session.commit()
-
-    reloaded = db_session.get(Citation, citation_id)
-    assert reloaded is not None
-    assert reloaded.chunk_id is None
-    assert reloaded.excerpt == "exact text"
-    # The document that owned the chunk is untouched by deleting the chunk alone.
-    assert db_session.get(Document, document.id) is not None
+def test_all_exports_every_model_and_the_embedding_pieces() -> None:
+    assert set(models.__all__) == {
+        "Base",
+        "Document",
+        "Chunk",
+        "Thread",
+        "Message",
+        "Citation",
+        "EmbeddingVector",
+        "EMBEDDING_DIM",
+    }

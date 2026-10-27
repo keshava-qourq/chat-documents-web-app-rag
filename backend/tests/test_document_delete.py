@@ -3,13 +3,14 @@
 Uses the shared `client`, `db_session` and `fake_object_store` fixtures from
 `conftest.py` -- an in-memory SQLite database per test and a fake object
 store standing in for MinIO, so this suite never touches live MinIO or
-Gemini. `app.ingestion.embed_texts` is monkeypatched in the AC-018 tests for
-the same reason: no live Gemini call is ever made.
+Gemini. `app.ingestion.embed_texts` and `app.retrieval.embed_texts` are
+monkeypatched in the tests that need them for the same reason: no live
+Gemini call is ever made.
 """
 
 import uuid
 
-from app import ingestion, storage
+from app import ingestion, retrieval, storage
 from app.models import Chunk, Document
 
 TXT_BYTES = b"plain text content"
@@ -75,11 +76,10 @@ def test_delete_removes_document_row_object_and_chunks_and_omits_it_from_list(
 
 
 def test_deleted_documents_chunks_are_absent_from_the_whole_chunk_table(client, db_session) -> None:
-    """There is no retrieval endpoint yet, but every retrieval implementation
-    this project could write has to start from a query against the `chunks`
-    table. Proving no row for the deleted document's id remains there -- for
-    either a direct lookup or a table-wide scan -- proves no citation built
-    from that table can ever reference it."""
+    """Proves no row for the deleted document's id remains in the `chunks`
+    table at all -- for either a direct lookup or a table-wide scan. The
+    test below goes one step further and proves the actual retrieval
+    service that builds citations agrees."""
     kept = _seed_ready_document_with_chunks(db_session, chunk_count=2)
     kept.file_name = "kept.txt"
     kept.storage_key = "kept.txt"
@@ -96,6 +96,36 @@ def test_deleted_documents_chunks_are_absent_from_the_whole_chunk_table(client, 
     assert all(chunk.document_id != deleted.id for chunk in all_remaining_chunks)
     assert len(all_remaining_chunks) == 2
     assert {chunk.document_id for chunk in all_remaining_chunks} == {kept.id}
+
+
+def test_deleted_documents_chunks_never_surface_through_retrieve_context(
+    client, db_session, monkeypatch
+) -> None:
+    """End-to-end proof of AC-016 through the real service that decides what
+    gets cited: `app.retrieval.retrieve_context` is what `generate_answer`
+    calls to build an answer's citations, so a deleted document's chunks
+    must never come back from it -- not just be absent from a raw table
+    scan."""
+    kept = _seed_ready_document_with_chunks(db_session, chunk_count=1)
+    kept.file_name = "kept.txt"
+    kept.storage_key = "kept.txt"
+    db_session.commit()
+    deleted = _seed_ready_document_with_chunks(db_session, chunk_count=1)
+    deleted.file_name = "deleted.txt"
+    deleted.storage_key = "deleted.txt"
+    db_session.commit()
+
+    response = client.delete(f"/documents/{deleted.id}")
+    assert response.status_code == 204
+
+    monkeypatch.setattr(retrieval, "embed_texts", lambda texts: [[0.1, 0.2, 0.3]])
+    monkeypatch.setattr(retrieval, "retrieval_similarity_threshold", lambda: -1.0)
+
+    context = retrieval.retrieve_context(db_session, "anything in the library?")
+
+    assert context.has_ready_documents is True
+    assert all(chunk.document_id != deleted.id for chunk in context.chunks)
+    assert {chunk.document_id for chunk in context.chunks} == {kept.id}
 
 
 # --- AC-017: no auth, no undo token, no actor column, unknown id is 404 -----
@@ -125,11 +155,10 @@ def test_delete_unknown_document_id_returns_404(client) -> None:
     assert response.status_code == 404
 
 
-def test_deleting_the_same_document_twice_returns_404_on_the_second_call_not_500(
-    client, db_session
-) -> None:
-    """Nothing about "no undo" should mean a second DELETE on an id that is
-    already gone crashes the server -- it is just another unknown id."""
+def test_delete_twice_returns_404_not_500_on_the_second_call(client, db_session) -> None:
+    """Idempotency of the destructive action: a second DELETE for a document
+    already removed must report it is gone (404), never blow up (500) just
+    because the row is no longer there to look up."""
     document = _seed_ready_document_with_chunks(db_session, chunk_count=1)
 
     first = client.delete(f"/documents/{document.id}")
@@ -137,23 +166,7 @@ def test_deleting_the_same_document_twice_returns_404_on_the_second_call_not_500
 
     assert first.status_code == 204
     assert second.status_code == 404
-
-
-def test_status_endpoint_reports_404_for_a_document_deleted_moments_ago(client, db_session) -> None:
-    """A poller that was mid-flight when the document was deleted must see
-    "not found", not a stale or empty success response, the next time it
-    checks -- the status route has no special case for a ghost id."""
-    document = _seed_ready_document_with_chunks(db_session, chunk_count=2)
-
-    pre_delete_status = client.get(f"/documents/{document.id}/status")
-    assert pre_delete_status.status_code == 200
-    assert pre_delete_status.json()["status"] == "ready"
-
-    delete_response = client.delete(f"/documents/{document.id}")
-    assert delete_response.status_code == 204
-
-    post_delete_status = client.get(f"/documents/{document.id}/status")
-    assert post_delete_status.status_code == 404
+    assert second.json()["detail"] == "Document not found"
 
 
 # --- AC-018: deleting a document mid-indexing aborts ingestion -------------

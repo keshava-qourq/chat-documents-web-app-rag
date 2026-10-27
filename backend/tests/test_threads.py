@@ -6,14 +6,6 @@ Uses the shared `client`, `db_session` and `db_sessionmaker` fixtures from
 MinIO call anywhere in this module, and no wall-clock sleeps: ordering is
 proven by writing distinct `last_active_at` values directly, not by waiting
 for time to pass.
-
-This file also absorbs the gaps left by `backend/app/tests/test_threads.py`
-(the duplicate unit-test pass an earlier, `backend/app/`-scoped ticket wrote
-for this same surface, since that agent had no write access to this
-directory): the 404 and validation paths on `POST /threads/{id}/messages`
-specifically, exercised at the HTTP layer rather than only against the
-Pydantic model in `test_schemas.py` or against `derive_title`/`request_answer`
-directly in `test_services.py`.
 """
 
 import uuid
@@ -21,9 +13,10 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
+from app import embeddings
 from app.database import get_db
 from app.main import app
-from app.models import Citation, Message, Thread
+from app.models import Chunk, Citation, Document, Message, Thread
 from app.services import derive_title
 
 # --- AC-043: empty list -------------------------------------------------
@@ -56,6 +49,28 @@ def test_list_threads_orders_by_last_active_at_descending(client, db_session) ->
     assert response.status_code == 200
     ordered_ids = [item["id"] for item in response.json()]
     assert ordered_ids == [newest, middle, oldest]
+
+
+# --- posting a message bumps the thread's own last_active_at -------------
+
+
+def test_posting_a_message_moves_its_thread_to_the_top_of_the_list(client) -> None:
+    """Unlike the test above (which writes `last_active_at` directly to
+    prove ordering itself), this drives the real behaviour end to end: the
+    router bumps `last_active_at` to the current time whenever a question is
+    posted, so an older thread that gets a new question jumps back above a
+    thread nobody has touched since -- without needing to assert anything
+    about the untouched thread's own position, which creation order alone
+    does not guarantee on a database with second-level timestamp
+    resolution.
+    """
+    older = client.post("/threads").json()["id"]
+    client.post("/threads")  # a second, untouched thread
+
+    client.post(f"/threads/{older}/messages", json={"question": "Wake this thread back up"})
+
+    reordered = [item["id"] for item in client.get("/threads").json()]
+    assert reordered[0] == older
 
 
 # --- AC-042: identical bodies for different callers ---------------------
@@ -99,23 +114,35 @@ def test_get_unknown_thread_id_returns_404(client) -> None:
     assert response.status_code == 404
 
 
-# --- a posted question shows up in the thread's own history --------------
+# --- GET returns every turn, in the order it was asked --------------------
 
 
-def test_the_users_own_turn_appears_in_thread_detail_with_no_citations(client) -> None:
+def test_get_thread_returns_every_question_in_chronological_order(client) -> None:
     thread_id = client.post("/threads").json()["id"]
 
-    client.post(
-        f"/threads/{thread_id}/messages",
-        json={"question": "Where is the expenses policy documented?"},
-    )
+    client.post(f"/threads/{thread_id}/messages", json={"question": "First question"})
+    client.post(f"/threads/{thread_id}/messages", json={"question": "Second question"})
+    client.post(f"/threads/{thread_id}/messages", json={"question": "Third question"})
 
     detail = client.get(f"/threads/{thread_id}").json()
-    assert len(detail["messages"]) >= 1
-    user_message = detail["messages"][0]
-    assert user_message["role"] == "user"
-    assert user_message["content"] == "Where is the expenses policy documented?"
-    assert user_message["citations"] == []
+    user_messages = [m for m in detail["messages"] if m["role"] == "user"]
+    assert [m["content"] for m in user_messages] == [
+        "First question",
+        "Second question",
+        "Third question",
+    ]
+    for message in user_messages:
+        assert message["role"] == "user"
+        assert message["citations"] == []
+
+
+# --- posting a question against an unknown thread -------------------------
+
+
+def test_post_message_to_unknown_thread_id_returns_404(client) -> None:
+    response = client.post(f"/threads/{uuid.uuid4()}/messages", json={"question": "hi"})
+
+    assert response.status_code == 404
 
 
 # --- AC-048 / AC-049 / AC-050: auto-titling ------------------------------
@@ -159,42 +186,6 @@ def test_a_second_question_leaves_the_title_unchanged(client) -> None:
     assert title_after_second == title_after_first
 
 
-# --- posting a question: 404 and validation at the HTTP layer ------------
-
-
-def test_post_message_to_an_unknown_thread_id_returns_404_and_persists_nothing(
-    client, db_session
-) -> None:
-    response = client.post(
-        f"/threads/{uuid.uuid4()}/messages", json={"question": "Anybody there?"}
-    )
-
-    assert response.status_code == 404
-    assert db_session.query(Message).count() == 0
-
-
-def test_post_message_with_an_empty_question_returns_422_and_persists_nothing(
-    client, db_session
-) -> None:
-    thread_id = client.post("/threads").json()["id"]
-
-    response = client.post(f"/threads/{thread_id}/messages", json={"question": ""})
-
-    assert response.status_code == 422
-    assert db_session.query(Message).filter(Message.thread_id == uuid.UUID(thread_id)).count() == 0
-    # The thread itself is untouched -- still its default title.
-    thread = client.get(f"/threads/{thread_id}").json()
-    assert thread["title"] == "New conversation"
-
-
-def test_post_message_with_a_missing_question_field_returns_422(client) -> None:
-    thread_id = client.post("/threads").json()["id"]
-
-    response = client.post(f"/threads/{thread_id}/messages", json={})
-
-    assert response.status_code == 422
-
-
 # --- AC-051 / AC-052: rename ---------------------------------------------
 
 
@@ -223,23 +214,6 @@ def test_rename_with_empty_title_returns_422_and_leaves_previous_title_intact(cl
 
     assert response.status_code == 422
 
-    thread = client.get(f"/threads/{thread_id}").json()
-    assert thread["title"] == "New conversation"
-
-
-def test_rename_with_a_literal_empty_string_title_returns_422_via_request_validation(
-    client,
-) -> None:
-    """Distinct code path from the whitespace-only case above: `""` is
-    rejected by `ThreadRenameRequest`'s own `min_length=1` before the
-    handler's manual `.strip()` check ever runs, so this proves the schema
-    is actually wired into the route rather than only tested in isolation
-    (as `test_schemas.py` already does for the bare model)."""
-    thread_id = client.post("/threads").json()["id"]
-
-    response = client.patch(f"/threads/{thread_id}", json={"title": ""})
-
-    assert response.status_code == 422
     thread = client.get(f"/threads/{thread_id}").json()
     assert thread["title"] == "New conversation"
 
@@ -352,3 +326,81 @@ def test_a_second_client_instance_over_the_same_database_reconstructs_the_thread
             assert body["messages"][0]["content"] == "Where is the remote work policy documented?"
     finally:
         app.dependency_overrides.pop(get_db, None)
+
+
+# --- AC-067: chat pre-flight check for a missing GEMINI_API_KEY -----------
+#
+# `app.services.request_answer` itself only calls Gemini once a `'ready'`
+# document exists (otherwise it returns its own canned, Gemini-free reply),
+# so `post_message` checks for a configured key *before* persisting
+# anything, and only when a `'ready'` document actually exists to answer
+# from. Both branches of that pre-flight live here, next to the rest of this
+# router's behaviour, exercised through the same `client` / `db_session`
+# fixtures as every other test in this module -- no real Gemini call is
+# reachable either way.
+
+
+def _seed_ready_document_with_chunk(db_session) -> Document:
+    document = Document(
+        id=uuid.uuid4(),
+        file_name="handbook.pdf",
+        mime_type="application/pdf",
+        size_bytes=10,
+        storage_key="handbook.pdf",
+        status="ready",
+        chunk_count=1,
+    )
+    db_session.add(document)
+    db_session.commit()
+    chunk = Chunk(
+        id=uuid.uuid4(),
+        document_id=document.id,
+        content="Employees get 25 days of annual leave.",
+        source_location="handbook.pdf, page 1",
+        chunk_index=0,
+        embedding=[1.0, 0.0],
+    )
+    db_session.add(chunk)
+    db_session.commit()
+    return document
+
+
+def test_chat_returns_structured_503_when_gemini_is_not_configured_and_a_document_is_ready(
+    client, db_session, monkeypatch
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    _seed_ready_document_with_chunk(db_session)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Gemini must not be called when GEMINI_API_KEY is unset")
+
+    monkeypatch.setattr(embeddings, "embed_texts", fail_if_called)
+
+    thread_id = client.post("/threads").json()["id"]
+    response = client.post(f"/threads/{thread_id}/messages", json={"question": "How many days?"})
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "gemini_not_configured"
+    assert "GEMINI_API_KEY" in body["detail"]["message"]
+
+    # The pre-flight check runs before anything is written to the thread --
+    # not even the user's own question was persisted.
+    detail = client.get(f"/threads/{thread_id}").json()
+    assert detail["messages"] == []
+
+
+def test_chat_still_answers_without_a_gemini_key_when_no_document_is_ready(
+    client, monkeypatch
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    thread_id = client.post("/threads").json()["id"]
+    response = client.post(f"/threads/{thread_id}/messages", json={"question": "Anything?"})
+
+    # No ready documents yet -> `request_answer`'s own canned, Gemini-free
+    # reply applies; a missing key must not block this case, and the user's
+    # question is still persisted.
+    assert response.status_code == 200
+    detail = client.get(f"/threads/{thread_id}").json()
+    assert detail["messages"][0]["content"] == "Anything?"

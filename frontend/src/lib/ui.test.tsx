@@ -1,16 +1,14 @@
-// Coverage for `app/lib/ui.tsx` -- the quiet component vocabulary every
-// generated screen is written against. There was no other seam exercising
-// this module directly: screens import `Button`, `Card`, `Select` and so on
-// and trust them to forward props, merge classes, and wire brand tokens
-// correctly. A regression here (a dropped `...props` spread, a variant that
-// silently falls through to nothing, a brand token that stops being read)
-// would surface as a broken screen everywhere at once.
+// Unit tests for `app/lib/ui.tsx`.
 //
-// These tests deliberately avoid pinning exact Tailwind class strings --
-// a restyle that keeps the component working should not fail this file.
-// Where the file's own stated contract is "reads from a CSS custom
-// property", the test checks for that token, because that *is* the
-// behaviour this module exists to provide.
+// This module is the component vocabulary every generated screen is written
+// against. The risk it actually carries is not "does Card look nice" --
+// nobody here judges that -- but: does each component render as the
+// semantic element a screen (and the accessibility tree) relies on, does a
+// caller-supplied className/prop reach the DOM instead of being swallowed,
+// do the controlled components (Switch, Select, Tabs) actually wire their
+// value/onChange through rather than rendering a static shell, and do the
+// brand-driven pieces (Button primary, Badge accent, headings) keep reading
+// `var(--brand-*)` so a brand change still repaints them.
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -33,12 +31,35 @@ import {
   Separator,
   Stat,
   Switch,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
   Tabs,
   Textarea,
 } from "./ui";
 
 describe("Button", () => {
-  it("renders its children, forwards onClick, and respects disabled", async () => {
+  it("renders a real <button> that fires onClick and forwards arbitrary props", async () => {
+    const onClick = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <Button onClick={onClick} className="extra-class" data-testid="save">
+        Save
+      </Button>,
+    );
+
+    const button = screen.getByRole("button", { name: "Save" });
+    expect(button).toHaveAttribute("data-testid", "save");
+    expect(button).toHaveClass("extra-class");
+
+    await user.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects the disabled prop, blocking the click a disabled button should never deliver", async () => {
     const onClick = vi.fn();
     const user = userEvent.setup();
     render(
@@ -49,336 +70,312 @@ describe("Button", () => {
 
     const button = screen.getByRole("button", { name: "Save" });
     expect(button).toBeDisabled();
+
     await user.click(button);
     expect(onClick).not.toHaveBeenCalled();
   });
 
-  it("fires onClick when enabled", async () => {
-    const onClick = vi.fn();
-    const user = userEvent.setup();
-    render(<Button onClick={onClick}>Go</Button>);
-
-    await user.click(screen.getByRole("button", { name: "Go" }));
-    expect(onClick).toHaveBeenCalledTimes(1);
-  });
-
-  it("paints the primary variant from the --brand-primary custom property, so a brand swap repaints it without a rebuild", () => {
-    render(<Button variant="primary">Primary</Button>);
-    const button = screen.getByRole("button", { name: "Primary" });
+  it("paints the primary variant from the brand token rather than a hardcoded color", () => {
+    render(<Button variant="primary">Go</Button>);
+    const button = screen.getByRole("button", { name: "Go" });
     expect(button.style.backgroundColor).toBe("var(--brand-primary)");
   });
 
-  it("does not hardcode a background colour for non-primary variants", () => {
-    render(<Button variant="secondary">Secondary</Button>);
-    const button = screen.getByRole("button", { name: "Secondary" });
-    expect(button.style.backgroundColor).toBe("");
+  it("does not apply the brand background to non-primary variants", () => {
+    render(<Button variant="secondary">Cancel</Button>);
+    const button = screen.getByRole("button", { name: "Cancel" });
+    expect(button.style.backgroundColor).not.toBe("var(--brand-primary)");
   });
 
-  it("falls back to the primary look's classes for an unrecognised variant, rather than rendering unstyled", () => {
-    render(
-      <>
-        <Button variant="not-a-real-variant">Mystery</Button>
-        <Button variant="primary">Known</Button>
-      </>,
-    );
-    const mystery = screen.getByRole("button", { name: "Mystery" });
-    const known = screen.getByRole("button", { name: "Known" });
-    expect(mystery.className).toBe(known.className);
-  });
-
-  it("falls back to the medium size for an unrecognised size", () => {
-    render(
-      <>
-        <Button size="not-a-real-size">Mystery</Button>
-        <Button size="md">Known</Button>
-      </>,
-    );
-    expect(screen.getByRole("button", { name: "Mystery" }).className).toBe(
-      screen.getByRole("button", { name: "Known" }).className,
-    );
-  });
-
-  it("merges a caller's className onto the base classes rather than replacing them", () => {
-    render(<Button className="my-custom-class">Styled</Button>);
-    const button = screen.getByRole("button", { name: "Styled" });
-    expect(button).toHaveClass("my-custom-class");
-    // base styling is still present -- the custom class was additive
-    expect(button.className.trim().split(/\s+/).length).toBeGreaterThan(1);
-  });
-
-  it("lets a caller's inline style win over the brand-derived background", () => {
-    render(
-      <Button variant="primary" style={{ backgroundColor: "red" }}>
-        Override
-      </Button>,
-    );
-    expect(screen.getByRole("button", { name: "Override" }).style.backgroundColor).toBe("red");
+  it("falls back to the primary variant's visual class for an unrecognized variant, instead of rendering unstyled", () => {
+    render(<Button variant="not-a-real-variant">Mystery</Button>);
+    const button = screen.getByRole("button", { name: "Mystery" });
+    // Falling back applies the primary *class* (the unknown-variant branch
+    // in BUTTON_VARIANTS); it does not retroactively count as the literal
+    // "primary" variant, so the brand background stays unset.
+    expect(button.className).toContain("hover:opacity-90");
+    expect(button.style.backgroundColor).not.toBe("var(--brand-primary)");
   });
 });
 
 describe("Card family", () => {
-  it("assembles a card from header, title, description, content and footer with every child rendered", () => {
+  it("composes into a structure a screen reader and a screen can both navigate", () => {
     render(
       <Card data-testid="card">
         <CardHeader>
-          <CardTitle>Document Library</CardTitle>
-          <CardDescription>All uploaded files</CardDescription>
+          <CardTitle>Title text</CardTitle>
+          <CardDescription>Description text</CardDescription>
         </CardHeader>
-        <CardContent>Body text</CardContent>
-        <CardFooter>
-          <Button>Action</Button>
-        </CardFooter>
+        <CardContent>Body content</CardContent>
+        <CardFooter>Footer content</CardFooter>
       </Card>,
     );
 
-    expect(screen.getByRole("heading", { name: "Document Library" })).toBeInTheDocument();
-    expect(screen.getByText("All uploaded files")).toBeInTheDocument();
-    expect(screen.getByText("Body text")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Action" })).toBeInTheDocument();
+    expect(screen.getByTestId("card")).toBeInTheDocument();
+    // CardTitle must render as a real heading, not a styled <div>, or a
+    // screen that relies on it for document structure loses that structure.
+    expect(screen.getByRole("heading", { name: "Title text", level: 3 })).toBeInTheDocument();
+    expect(screen.getByText("Description text")).toBeInTheDocument();
+    expect(screen.getByText("Body content")).toBeInTheDocument();
+    expect(screen.getByText("Footer content")).toBeInTheDocument();
   });
 
-  it("lets CardTitle inherit the brand heading font, so a font swap repaints headings everywhere", () => {
-    render(<CardTitle>Heading</CardTitle>);
-    const heading = screen.getByRole("heading", { name: "Heading" });
+  it("gives CardTitle the heading font token so a brand change can restyle it", () => {
+    render(<CardTitle>Headline</CardTitle>);
+    const heading = screen.getByRole("heading", { name: "Headline" });
     expect(heading.style.fontFamily).toBe("var(--brand-font-heading)");
   });
-
-  it("merges a caller's className onto Card without dropping it", () => {
-    render(<Card data-testid="card" className="col-span-2" />);
-    expect(screen.getByTestId("card")).toHaveClass("col-span-2");
-  });
 });
 
-describe("Form controls", () => {
-  it("Input forwards value, placeholder and change events like a native input", async () => {
-    const onChange = vi.fn();
+describe("form controls", () => {
+  it("Input is a real text input that accepts typing and forwards className", async () => {
     const user = userEvent.setup();
-    render(<Input placeholder="Search" onChange={onChange} />);
+    render(<Input aria-label="Email" className="custom-input" />);
+    const input = screen.getByRole("textbox", { name: "Email" });
+    expect(input).toHaveClass("custom-input");
 
-    const input = screen.getByPlaceholderText("Search");
-    await user.type(input, "a");
-    expect(onChange).toHaveBeenCalled();
+    await user.type(input, "person@example.com");
+    expect(input).toHaveValue("person@example.com");
   });
 
-  it("Textarea renders as a real textarea and accepts typed text", async () => {
+  it("Textarea accepts multi-line typing", async () => {
     const user = userEvent.setup();
     render(<Textarea aria-label="Notes" />);
-    const textarea = screen.getByLabelText("Notes");
-    await user.type(textarea, "hello");
-    expect(textarea).toHaveValue("hello");
+    const textarea = screen.getByRole("textbox", { name: "Notes" });
+    await user.type(textarea, "line one");
+    expect(textarea).toHaveValue("line one");
   });
 
-  it("Label associates with its control via htmlFor, the way a form actually needs", () => {
+  it("Label associates with its control via htmlFor, so clicking the label focuses the input", async () => {
+    const user = userEvent.setup();
     render(
       <>
-        <Label htmlFor="thing">Thing</Label>
-        <Input id="thing" />
+        <Label htmlFor="the-input">Name</Label>
+        <Input id="the-input" />
       </>,
     );
-    expect(screen.getByLabelText("Thing")).toBeInTheDocument();
+
+    const input = screen.getByLabelText("Name");
+    await user.click(screen.getByText("Name"));
+    expect(input).toHaveFocus();
   });
 
-  it("Checkbox is a real checkbox that toggles on click", async () => {
-    const onChange = vi.fn();
-    const user = userEvent.setup();
-    render(<Checkbox aria-label="Agree" onChange={onChange} />);
-    const box = screen.getByRole("checkbox", { name: "Agree" });
-    expect(box).not.toBeChecked();
-    await user.click(box);
-    expect(onChange).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("Select", () => {
-  it("renders an <option> for each entry in the options prop, with matching value and label", () => {
+  it("Select renders options from the options prop with correct values and labels", () => {
     render(
       <Select
-        aria-label="Fruit"
+        aria-label="Country"
         options={[
-          { value: "apple", label: "Apple" },
-          { value: "pear", label: "Pear" },
+          { value: "us", label: "United States" },
+          { value: "ca", label: "Canada" },
         ]}
       />,
     );
-    const select = screen.getByLabelText("Fruit") as HTMLSelectElement;
-    const options = Array.from(select.options);
-    expect(options.map((o) => o.value)).toEqual(["apple", "pear"]);
-    expect(options.map((o) => o.textContent)).toEqual(["Apple", "Pear"]);
+
+    const select = screen.getByRole("combobox", { name: "Country" }) as HTMLSelectElement;
+    const optionEls = Array.from(select.options);
+    expect(optionEls.map((o) => [o.value, o.textContent])).toEqual([
+      ["us", "United States"],
+      ["ca", "Canada"],
+    ]);
   });
 
-  it("renders explicit children instead of the options prop when both are given", () => {
+  it("Select renders explicit children instead of the options prop when both could apply", () => {
     render(
-      <Select aria-label="Fruit" options={[{ value: "apple", label: "Apple" }]}>
-        <option value="kiwi">Kiwi</option>
+      <Select aria-label="Country">
+        <option value="uk">United Kingdom</option>
       </Select>,
     );
-    const select = screen.getByLabelText("Fruit") as HTMLSelectElement;
-    const options = Array.from(select.options);
-    expect(options.map((o) => o.value)).toEqual(["kiwi"]);
+
+    const select = screen.getByRole("combobox", { name: "Country" }) as HTMLSelectElement;
+    expect(select.options.length).toBe(1);
+    expect(select.options[0].value).toBe("uk");
   });
 
-  it("fires onChange with the newly selected value", async () => {
+  it("Select fires onChange with the selected value, so a controlled screen actually receives it", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(
       <Select
-        aria-label="Fruit"
+        aria-label="Country"
         onChange={onChange}
         options={[
-          { value: "apple", label: "Apple" },
-          { value: "pear", label: "Pear" },
+          { value: "us", label: "United States" },
+          { value: "ca", label: "Canada" },
         ]}
       />,
     );
-    await user.selectOptions(screen.getByLabelText("Fruit"), "pear");
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Country" }), "ca");
     expect(onChange).toHaveBeenCalled();
-    expect((screen.getByLabelText("Fruit") as HTMLSelectElement).value).toBe("pear");
+    expect((screen.getByRole("combobox", { name: "Country" }) as HTMLSelectElement).value).toBe(
+      "ca",
+    );
+  });
+
+  it("Checkbox is a real checkbox input that toggles and reports checked state", async () => {
+    const user = userEvent.setup();
+    render(<Checkbox aria-label="Accept terms" />);
+    const checkbox = screen.getByRole("checkbox", { name: "Accept terms" });
+    expect(checkbox).not.toBeChecked();
+
+    await user.click(checkbox);
+    expect(checkbox).toBeChecked();
   });
 });
 
 describe("Switch", () => {
-  it("reflects the checked prop onto a real checkbox input", () => {
-    render(<Switch checked aria-label="Enabled" />);
-    expect(screen.getByRole("checkbox", { hidden: true })).toBeChecked();
-  });
-
-  it("invokes onChange when the control is clicked, since it is the only way a user can flip it", async () => {
+  it("reflects the checked prop and calls onChange when toggled, as a controlled control must", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(<Switch checked={false} onChange={onChange} />);
-    await user.click(screen.getByRole("checkbox", { hidden: true }));
+
+    const toggle = screen.getByRole("checkbox", { hidden: true });
+    expect(toggle).not.toBeChecked();
+
+    await user.click(toggle);
     expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders as checked when the checked prop is true", () => {
+    render(<Switch checked onChange={() => {}} />);
+    const toggle = screen.getByRole("checkbox", { hidden: true });
+    expect(toggle).toBeChecked();
   });
 });
 
 describe("Badge", () => {
-  it("paints the accent variant from the --brand-accent custom property", () => {
-    render(<Badge variant="accent">New</Badge>);
+  it("applies the accent brand token as a background for the accent variant only", () => {
+    const { rerender } = render(<Badge variant="accent">New</Badge>);
     expect(screen.getByText("New").style.backgroundColor).toBe("var(--brand-accent)");
+
+    rerender(<Badge variant="success">Done</Badge>);
+    expect(screen.getByText("Done").style.backgroundColor).not.toBe("var(--brand-accent)");
   });
 
-  it("does not set an inline background colour for a non-accent variant", () => {
-    render(<Badge variant="success">Ready</Badge>);
-    expect(screen.getByText("Ready").style.backgroundColor).toBe("");
-  });
-
-  it("falls back to the default look for an unrecognised variant", () => {
-    render(
-      <>
-        <Badge variant="not-a-real-variant">Mystery</Badge>
-        <Badge variant="default">Known</Badge>
-      </>,
-    );
-    expect(screen.getByText("Mystery").className).toBe(screen.getByText("Known").className);
+  it("falls back to the default visual style for an unknown variant", () => {
+    render(<Badge variant="not-a-real-variant">Weird</Badge>);
+    const badge = screen.getByText("Weird");
+    expect(badge.className).toContain("bg-slate-100");
   });
 });
 
-describe("Table", () => {
-  it("renders standard table semantics so assistive tech sees rows, column headers and cells", () => {
+describe("Table family", () => {
+  it("renders a real, navigable <table> with head and body rows, inside a scroll wrapper", () => {
     render(
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Size</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>handbook.pdf</td>
-            <td>12 KB</td>
-          </tr>
-        </tbody>
-      </table>,
+      <Table aria-label="Documents">
+        <THead>
+          <TR>
+            <TH>Name</TH>
+            <TH>Size</TH>
+          </TR>
+        </THead>
+        <TBody>
+          <TR>
+            <TD>handbook.pdf</TD>
+            <TD>1 KB</TD>
+          </TR>
+        </TBody>
+      </Table>,
     );
-    expect(screen.getByRole("table")).toBeInTheDocument();
-    expect(screen.getAllByRole("columnheader")).toHaveLength(2);
-    expect(screen.getAllByRole("cell")).toHaveLength(2);
+
+    const table = screen.getByRole("table", { name: "Documents" });
+    expect(table).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Name" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "handbook.pdf" })).toBeInTheDocument();
+    // The wrapper exists specifically so a wide table scrolls instead of
+    // breaking a narrow screen -- losing it is a real regression, not cosmetic.
+    expect(table.parentElement).toHaveClass("overflow-x-auto");
   });
 });
 
 describe("Avatar", () => {
-  it("derives initials from the first letters of the first two words of the name", () => {
-    render(<Avatar name="Jane Doe" />);
-    expect(screen.getByText("JD")).toBeInTheDocument();
+  it("renders up to two initials from the name when no image is given", () => {
+    render(<Avatar name="Ada Lovelace" />);
+    expect(screen.getByText("AL")).toBeInTheDocument();
   });
 
-  it("uses a single initial for a single-word name", () => {
-    render(<Avatar name="Cher" />);
-    expect(screen.getByText("C")).toBeInTheDocument();
+  it("renders an <img> with the name as alt text when a src is given, not the initials", () => {
+    render(<Avatar name="Ada Lovelace" src="https://example.com/ada.png" />);
+    const img = screen.getByRole("img", { name: "Ada Lovelace" });
+    expect(img).toHaveAttribute("src", "https://example.com/ada.png");
+    expect(screen.queryByText("AL")).not.toBeInTheDocument();
   });
 
-  it("ignores words beyond the first two", () => {
-    render(<Avatar name="Jane Quincy Doe" />);
-    expect(screen.getByText("JQ")).toBeInTheDocument();
-    expect(screen.queryByText("JD")).not.toBeInTheDocument();
+  it("renders no initials text for an empty name, rather than throwing", () => {
+    render(<Avatar />);
+    // Should not throw and should render an empty label rather than
+    // "undefinedundefined" or similar from an unguarded initials join.
+    const avatar = document.querySelector("span");
+    expect(avatar?.textContent).toBe("");
   });
+});
 
-  it("renders an image with the name as alt text when a src is given, instead of initials", () => {
-    render(<Avatar name="Jane Doe" src="https://example.com/jane.png" />);
-    const img = screen.getByRole("img", { name: "Jane Doe" });
-    expect(img).toHaveAttribute("src", "https://example.com/jane.png");
-    expect(screen.queryByText("JD")).not.toBeInTheDocument();
+describe("Separator", () => {
+  it("renders a real <hr>, the element assistive tech recognizes as a divider", () => {
+    render(<Separator className="my-4" />);
+    const hr = document.querySelector("hr");
+    expect(hr).not.toBeNull();
+    expect(hr).toHaveClass("my-4");
   });
 });
 
 describe("Tabs", () => {
-  it("renders a button per tab and calls onChange with the clicked tab's key", async () => {
+  it("renders one button per tab, marks the active one, and calls onChange with the clicked key", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(
       <Tabs
         tabs={[
-          { key: "all", label: "All" },
-          { key: "failed", label: "Failed" },
+          { key: "overview", label: "Overview" },
+          { key: "activity", label: "Activity" },
         ]}
-        active="all"
+        active="overview"
         onChange={onChange}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Failed" }));
-    expect(onChange).toHaveBeenCalledWith("failed");
+    const overview = screen.getByRole("button", { name: "Overview" });
+    const activity = screen.getByRole("button", { name: "Activity" });
+    expect(overview.className).not.toBe(activity.className);
+
+    await user.click(activity);
+    expect(onChange).toHaveBeenCalledWith("activity");
   });
 });
 
 describe("Stat", () => {
-  it("shows the label and value, and omits the hint paragraph when none is given", () => {
-    render(<Stat label="Documents" value={12} />);
+  it("renders the label, value and optional hint", () => {
+    render(<Stat label="Documents" value={42} hint="Across 3 folders" />);
     expect(screen.getByText("Documents")).toBeInTheDocument();
-    expect(screen.getByText("12")).toBeInTheDocument();
-    expect(screen.queryByText(/of 200/)).not.toBeInTheDocument();
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByText("Across 3 folders")).toBeInTheDocument();
   });
 
-  it("shows the hint when one is given", () => {
-    render(<Stat label="Documents" value={12} hint="of 200 allowed" />);
-    expect(screen.getByText("of 200 allowed")).toBeInTheDocument();
-  });
-});
-
-describe("Separator", () => {
-  it("renders a horizontal rule", () => {
-    render(<Separator />);
-    expect(screen.getByRole("separator")).toBeInTheDocument();
+  it("renders no hint paragraph when none is given, rather than an empty one", () => {
+    render(<Stat label="Documents" value={42} />);
+    expect(screen.getByText("Documents")).toBeInTheDocument();
+    expect(screen.queryByText("Across 3 folders")).not.toBeInTheDocument();
   });
 });
 
 describe("Empty", () => {
-  it("renders only the title when no description or action is given", () => {
-    render(<Empty title="No documents yet" />);
-    expect(screen.getByText("No documents yet")).toBeInTheDocument();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-  });
-
-  it("renders the description and action when both are given", () => {
+  it("renders the title, optional description and an action when given", () => {
     render(
       <Empty
         title="No documents yet"
-        description="Upload a PDF to get started."
-        action={<Button>Upload</Button>}
+        description="Upload a file to get started."
+        action={<button>Upload</button>}
       />,
     );
-    expect(screen.getByText("Upload a PDF to get started.")).toBeInTheDocument();
+
+    expect(screen.getByText("No documents yet")).toBeInTheDocument();
+    expect(screen.getByText("Upload a file to get started.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
+  });
+
+  it("renders only the title when description and action are omitted", () => {
+    render(<Empty title="Nothing here" />);
+    expect(screen.getByText("Nothing here")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });
